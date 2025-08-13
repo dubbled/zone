@@ -65,6 +65,8 @@ func buildGraph(w, h int) Graph {
 		}
 	}
 
+	// example
+
 	return graph
 }
 
