@@ -1,30 +1,12 @@
 package main
 
-import "fmt"
-
-type Graph [][]*Node
-
-type NodeAttribute string
-
-const (
-	NodeWaterSource NodeAttribute = "node_water_source"
-	NodeIronSource  NodeAttribute = "node_iron_source"
+import (
+	"fmt"
+	"log"
+	"net/http"
 )
 
-// Node is a single vertex in the graph
-type Node struct {
-	members    []Member
-	attributes []NodeAttribute
-}
-
-// Player executes actions against the game state
-type Player struct{}
-
-// Member is a member of a node, of which there can be many
-type Member struct {
-	owner *Player
-	typ   string
-}
+type Graph [][]*Node
 
 type State struct {
 	players []*Player
@@ -33,23 +15,15 @@ type State struct {
 
 func (s *State) AddPlayer(p *Player) {
 	s.players = append(s.players, p)
+
+	member := createMember(s.graph, "player", p)
+	s.graph[p.x][p.y].AddMember(member)
 }
 
 // An action is an action that a player takes to modify the state
 // Actions can be executed over a number of ticks
 // Copmlex actions will be reduced by each turn
 type Action struct{}
-
-func createNode() *Node {
-	return &Node{
-		members:    []Member{},
-		attributes: []NodeAttribute{},
-	}
-}
-
-func createPlayer(x, y int) *Player {
-	return &Player{}
-}
 
 func validateAction(a Action) error {
 	return nil
@@ -64,8 +38,6 @@ func buildGraph(w, h int) Graph {
 			column[index] = createNode()
 		}
 	}
-
-	// example
 
 	return graph
 }
@@ -97,4 +69,19 @@ func main() {
 	state.AddPlayer(createPlayer(len(graph), len(graph[0])))
 
 	printGraph(graph)
+
+	// Serve static files from the "./static" directory
+	fs := http.FileServer(http.Dir("./static"))
+	http.Handle("/", fs)
+
+	go func() {
+		log.Println("Starting server at port 8080")
+		if err := http.ListenAndServe(":8080", nil); err != nil {
+			log.Fatal(err)
+		}
+	}()
+
+	for {
+
+	}
 }
