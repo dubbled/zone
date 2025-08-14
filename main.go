@@ -142,12 +142,16 @@ func socketHandler(state *State) func(http.ResponseWriter, *http.Request) {
 					return
 				}
 
-				action := []Action{}
-				err = json.Unmarshal(message, &action)
+				actions := []Action{}
+				err = json.Unmarshal(message, &actions)
 				if err != nil {
 					socketError := SocketError{Error: err.Error()}
 					conn.WriteMessage(websocket.TextMessage, []byte(socketError.Error))
 					continue
+				}
+
+				for _, action := range actions {
+					player.QueueAction(action)
 				}
 			}
 		}
