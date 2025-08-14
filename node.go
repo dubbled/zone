@@ -9,6 +9,7 @@ const (
 
 // Node is a single vertex in the graph
 type Node struct {
+	loc        *Point
 	members    []*Member
 	attributes []*NodeAttribute
 }

@@ -1,11 +1,16 @@
 package main
 
-import "github.com/google/uuid"
+import (
+	"log"
+
+	"github.com/google/uuid"
+)
 
 // Player executes actions against the game state
 type Player struct {
-	id   string
-	x, y int
+	id            string
+	x, y          int
+	QueuedActions []Action
 }
 
 func createPlayer(x, y int) *Player {
@@ -14,9 +19,25 @@ func createPlayer(x, y int) *Player {
 	return p
 }
 
-func (p *Player) MoveMember(g Graph, m *Member) {
+func (p *Player) validateAction(a Action) error {
+	return nil
+}
+
+func (p *Player) error(err error) {
+	log.Println(err)
+}
+
+func (p *Player) QueueAction(a Action) {
+	if err := p.validateAction(a); err != nil {
+		p.error(err)
+		return
+	}
+
+	p.QueuedActions = append(p.QueuedActions, a)
+}
+
+func (p *Player) MoveMember(g Graph, m *Member, x, y int) {
 	// validate travel path/distance
-	g[p.x][p.y].RemoveMember(m)
-	m.loc = Point{x: p.x, y: p.y}
-	g[p.x][p.y].AddMember(m)
+	m.node.RemoveMember(m)
+	g[x][y].AddMember(m)
 }

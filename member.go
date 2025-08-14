@@ -15,23 +15,20 @@ func createNode() *Node {
 
 // Member is a member of a node, of which there can be many
 type Member struct {
-	loc   Point
 	owner *Player
 	id    string
-	x, y  int
 	typ   string
 	node  *Node
 }
 
-func createMember(g Graph, typ string, owner *Player) *Member {
-	return &Member{
+func createMember(typ string, node *Node) *Member {
+	member := &Member{
 		id:    uuid.New().String(),
-		node:  GetNode(g, owner.x, owner.y),
-		owner: owner,
+		node:  node,
+		owner: node.members[0].owner,
 		typ:   typ,
-		loc: Point{
-			x: owner.x,
-			y: owner.y,
-		},
 	}
+
+	node.members = append(node.members, member)
+	return member
 }
