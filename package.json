@@ -1,0 +1,17 @@
+{
+  "dependencies": {
+    "konva": "latest"
+  },
+  "main": "/index.js",
+  "devDependencies": {}
+}
+{
+  "name": "zone",
+  "version": "1.0.0",
+  "description": "A simple web application",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "author": "Theis",
+  "license": "MIT"
+}
