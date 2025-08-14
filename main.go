@@ -23,7 +23,7 @@ func (s *State) AddPlayer(p *Player) {
 	s.players[p.id] = p
 
 	node := s.graph[p.x][p.y]
-	member := createMember("player", node)
+	member := createMember("player", node, p)
 
 	s.graph[p.x][p.y].AddMember(member)
 }
@@ -169,15 +169,15 @@ func main() {
 	state := &State{graph: graph, players: map[string]*Player{}}
 
 	state.AddPlayer(createPlayer(0, 0))
-	state.AddPlayer(createPlayer(len(graph), len(graph[0])))
+	state.AddPlayer(createPlayer(len(graph)-1, len(graph[0])-1))
 
 	go func() {
 		// Serve static files from the "./static" directory
 		r := chi.NewRouter()
 		fs := http.FileServer(http.Dir("./static"))
 
-		r.Get("/", fs.ServeHTTP)
-		r.Get("/updates/{playerID}", socketHandler(state))
+		http.Handle("/", fs)
+		// r.Get("/updates/{playerID}", socketHandler(state))
 
 		log.Println("Starting server at port 8080")
 		if err := http.ListenAndServe(":8080", r); err != nil {

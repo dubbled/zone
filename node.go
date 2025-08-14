@@ -26,10 +26,14 @@ func (n *Node) AddMember(m *Member) {
 }
 
 func (n *Node) RemoveMember(m *Member) {
-	for i, member := range n.members {
-		if member.id == m.id {
-			n.members = append(n.members[:i], n.members[i+1:]...)
-			break
+	if m.count > 0 {
+		m.count--
+	} else {
+		for i, member := range n.members {
+			if member == m {
+				n.members = append(n.members[:i], n.members[i+1:]...)
+				return
+			}
 		}
 	}
 }
