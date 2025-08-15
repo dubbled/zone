@@ -9,8 +9,8 @@ const (
 
 // Node is a single vertex in the graph
 type Node struct {
-	Members    []*Member        `json:"members"`
-	Attributes []*NodeAttribute `json:"attributes"`
+	Members    []*Member        `json:"m"`
+	Attributes []*NodeAttribute `json:"a"`
 }
 
 func GetNode(g Graph, x, y int) *Node {

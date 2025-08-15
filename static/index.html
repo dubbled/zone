@@ -69,11 +69,11 @@
                 for (let x = 0; x < graph.length; x++) {
                     for (let y = 0; y < graph[x].length; y++) {
                         const node = graph[x][y];
-                        if (!node || !Array.isArray(node.members)) continue;
+                        if (!node || !Array.isArray(node.m)) continue;
                         const cx = x * GRID_SIZE + GRID_SIZE / 2;
                         const cy = y * GRID_SIZE + GRID_SIZE / 2;
                         // Draw a circle for each member
-                        for (const member of node.members) {
+                        for (const member of node.m) {
                             ctx.beginPath();
                             ctx.arc(cx, cy, 3, 0, 2 * Math.PI);
                             ctx.fillStyle = member.typ === 'player' ? 'red' : 'blue';

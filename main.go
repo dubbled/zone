@@ -60,30 +60,17 @@ func (g Graph) SizeY() int {
 	return len(g[0])
 }
 
-func printGraph(g Graph) {
-	for _, x := range g {
-		for _, y := range x {
-			members := len(y.Members)
-			fmt.Printf("%d", members)
-		}
-		fmt.Println()
-	}
-}
-
 func (s *State) tick() {
-	// for _, p := range s.players {
-
-	// }
+	for _, p := range s.players {
+		node := s.graph[p.x][p.y]
+		member := createMember("unit", node, p)
+		node.AddMember(member)
+	}
 }
 
-// Helper to check if a node has a player member
-func nodeHasPlayer(n *Node) bool {
-	for _, m := range n.Members {
-		if m.Typ == "player" {
-			return true
-		}
-	}
-	return false
+// Helper to check if a node has a member
+func nodeHasMember(n *Node) bool {
+	return len(n.Members) > 0
 }
 
 // Find a random point at least minDist away from all players
@@ -111,7 +98,7 @@ func findSafeSpawn(graph Graph, minDist int) (int, int) {
 				continue
 			}
 			visited[p.x][p.y] = true
-			if p.d > 0 && nodeHasPlayer(graph[p.x][p.y]) {
+			if p.d > 0 && nodeHasMember(graph[p.x][p.y]) {
 				found = true
 				break
 			}
@@ -122,6 +109,7 @@ func findSafeSpawn(graph Graph, minDist int) (int, int) {
 			queue = append(queue, point{p.x, p.y - 1, p.d + 1})
 		}
 		if !found {
+			fmt.Println("found safe spawn", x, y)
 			return x, y
 		}
 		// else, try again
@@ -140,8 +128,8 @@ func socketHandler(state *State) func(http.ResponseWriter, *http.Request) {
 			fmt.Println("finding safe spawn for player")
 			x, y := findSafeSpawn(state.graph, 30)
 			player = createPlayer(playerID, x, y)
+			state.AddPlayer(player)
 		}
-		state.AddPlayer(player)
 
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
@@ -184,7 +172,7 @@ func socketHandler(state *State) func(http.ResponseWriter, *http.Request) {
 							return
 						}
 					}
-					time.Sleep(time.Second * 5)
+					time.Sleep(time.Second * 1)
 				}
 			}
 		}()
@@ -227,23 +215,27 @@ var upgrader = websocket.Upgrader{
 }
 
 func main() {
-	graph := buildGraph(1000, 1000)
-
+	w, h := 100, 100
+	graph := buildGraph(w, h)
 	state := &State{graph: graph, players: map[string]*Player{}}
+
+	// Initialize a fake seed player at random coordinates
+	x := rand.Intn(w)
+	y := rand.Intn(h)
+	seed := createPlayer("seed", x, y)
+	state.AddPlayer(seed)
 
 	go func() {
 		// Serve static files from the "./static" directory
 		r := chi.NewRouter()
 
 		r.Use(cors.Handler(cors.Options{
-			// AllowedOrigins:   []string{"https://foo.com"}, // Use this to allow specific origin hosts
-			AllowedOrigins: []string{"https://*", "http://*"},
-			// AllowOriginFunc:  func(r *http.Request, origin string) bool { return true },
+			AllowedOrigins:   []string{"https://*", "http://*"},
 			AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
 			AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-CSRF-Token"},
 			ExposedHeaders:   []string{"Link"},
 			AllowCredentials: false,
-			MaxAge:           300, // Maximum value not ignored by any of major browsers
+			MaxAge:           300,
 		}))
 
 		fs := http.FileServer(http.Dir("./static"))
@@ -259,5 +251,6 @@ func main() {
 
 	for {
 		state.tick()
+		time.Sleep(time.Second * 1)
 	}
 }
