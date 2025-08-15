@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math/rand"
 	"net/http"
 	"time"
 
 	"github.com/go-chi/chi"
+	"github.com/go-chi/cors"
 	"github.com/gorilla/websocket"
 )
 
@@ -61,7 +63,7 @@ func (g Graph) SizeY() int {
 func printGraph(g Graph) {
 	for _, x := range g {
 		for _, y := range x {
-			members := len(y.members)
+			members := len(y.Members)
 			fmt.Printf("%d", members)
 		}
 		fmt.Println()
@@ -74,14 +76,72 @@ func (s *State) tick() {
 	// }
 }
 
+// Helper to check if a node has a player member
+func nodeHasPlayer(n *Node) bool {
+	for _, m := range n.Members {
+		if m.Typ == "player" {
+			return true
+		}
+	}
+	return false
+}
+
+// Find a random point at least minDist away from all players
+func findSafeSpawn(graph Graph, minDist int) (int, int) {
+	sizeX := len(graph)
+	sizeY := len(graph[0])
+	tryCount := 0
+	for {
+		tryCount++
+		x := rand.Intn(sizeX)
+		y := rand.Intn(sizeY)
+
+		// BFS to check for any player within minDist
+		type point struct{ x, y, d int }
+		visited := make([][]bool, sizeX)
+		for i := range visited {
+			visited[i] = make([]bool, sizeY)
+		}
+		queue := []point{{x, y, 0}}
+		found := false
+		for len(queue) > 0 {
+			p := queue[0]
+			queue = queue[1:]
+			if p.x < 0 || p.x >= sizeX || p.y < 0 || p.y >= sizeY || visited[p.x][p.y] || p.d > minDist {
+				continue
+			}
+			visited[p.x][p.y] = true
+			if p.d > 0 && nodeHasPlayer(graph[p.x][p.y]) {
+				found = true
+				break
+			}
+			// Add neighbors
+			queue = append(queue, point{p.x + 1, p.y, p.d + 1})
+			queue = append(queue, point{p.x - 1, p.y, p.d + 1})
+			queue = append(queue, point{p.x, p.y + 1, p.d + 1})
+			queue = append(queue, point{p.x, p.y - 1, p.d + 1})
+		}
+		if !found {
+			return x, y
+		}
+		// else, try again
+	}
+}
+
 func socketHandler(state *State) func(http.ResponseWriter, *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		playerID := chi.URLParam(r, "playerID")
+		log.Println("got request for playerID", playerID)
+
+		fmt.Println(state.players)
+
 		player := state.players[playerID]
 		if player == nil {
-			http.Error(w, "Player not found", http.StatusNotFound)
-			return
+			fmt.Println("finding safe spawn for player")
+			x, y := findSafeSpawn(state.graph, 30)
+			player = createPlayer(playerID, x, y)
 		}
+		state.AddPlayer(player)
 
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
@@ -116,15 +176,15 @@ func socketHandler(state *State) func(http.ResponseWriter, *http.Request) {
 
 					err = conn.WriteMessage(websocket.TextMessage, []byte(out))
 					// TODO: threshold fail?
-					log.Println(err)
 					if err != nil {
+						log.Println(err)
 						outErrCount++
 						if outErrCount > 5 {
 							cancel()
 							return
 						}
 					}
-					time.Sleep(time.Second)
+					time.Sleep(time.Second * 5)
 				}
 			}
 		}()
@@ -161,23 +221,35 @@ func socketHandler(state *State) func(http.ResponseWriter, *http.Request) {
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
+	CheckOrigin: func(r *http.Request) bool {
+		return true
+	},
 }
 
 func main() {
-	graph := buildGraph(10, 10)
+	graph := buildGraph(1000, 1000)
 
 	state := &State{graph: graph, players: map[string]*Player{}}
-
-	state.AddPlayer(createPlayer(0, 0))
-	state.AddPlayer(createPlayer(len(graph)-1, len(graph[0])-1))
 
 	go func() {
 		// Serve static files from the "./static" directory
 		r := chi.NewRouter()
-		fs := http.FileServer(http.Dir("./static"))
 
+		r.Use(cors.Handler(cors.Options{
+			// AllowedOrigins:   []string{"https://foo.com"}, // Use this to allow specific origin hosts
+			AllowedOrigins: []string{"https://*", "http://*"},
+			// AllowOriginFunc:  func(r *http.Request, origin string) bool { return true },
+			AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
+			AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-CSRF-Token"},
+			ExposedHeaders:   []string{"Link"},
+			AllowCredentials: false,
+			MaxAge:           300, // Maximum value not ignored by any of major browsers
+		}))
+
+		fs := http.FileServer(http.Dir("./static"))
 		http.Handle("/", fs)
-		// r.Get("/updates/{playerID}", socketHandler(state))
+
+		r.Get("/updates/{playerID}", socketHandler(state))
 
 		log.Println("Starting server at port 8080")
 		if err := http.ListenAndServe(":8080", r); err != nil {

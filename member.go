@@ -1,34 +1,36 @@
 package main
 
-import "github.com/google/uuid"
-
 type Point struct {
 	x, y int
 }
 
 func createNode() *Node {
 	return &Node{
-		members:    []*Member{},
-		attributes: []*NodeAttribute{},
+		Members:    []*Member{},
+		Attributes: []*NodeAttribute{},
 	}
 }
 
 // Member is a member of a node, of which there can be many
 type Member struct {
 	owner *Player
-	id    string
-	typ   string
+	Typ   string `json:"typ"`
 	node  *Node
+	Count int `json:"count"`
 }
 
-func createMember(typ string, node *Node) *Member {
+func createMember(typ string, node *Node, owner *Player) *Member {
 	member := &Member{
-		id:    uuid.New().String(),
 		node:  node,
-		owner: node.members[0].owner,
-		typ:   typ,
+		owner: owner,
+		Typ:   typ,
+		Count: 0,
 	}
 
-	node.members = append(node.members, member)
+	node.Members = append(node.Members, member)
 	return member
+}
+
+func (m *Member) AddCount(count int) {
+	m.Count += count
 }

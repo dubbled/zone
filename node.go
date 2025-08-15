@@ -9,9 +9,8 @@ const (
 
 // Node is a single vertex in the graph
 type Node struct {
-	loc        *Point
-	members    []*Member
-	attributes []*NodeAttribute
+	Members    []*Member        `json:"members"`
+	Attributes []*NodeAttribute `json:"attributes"`
 }
 
 func GetNode(g Graph, x, y int) *Node {
@@ -22,26 +21,18 @@ func GetNode(g Graph, x, y int) *Node {
 }
 
 func (n *Node) AddMember(m *Member) {
-	n.members = append(n.members, m)
+	n.Members = append(n.Members, m)
 }
 
 func (n *Node) RemoveMember(m *Member) {
-	if m.count > 0 {
-		m.count--
+	if m.Count > 0 {
+		m.Count--
 	} else {
-		for i, member := range n.members {
+		for i, member := range n.Members {
 			if member == m {
-				n.members = append(n.members[:i], n.members[i+1:]...)
+				n.Members = append(n.Members[:i], n.Members[i+1:]...)
 				return
 			}
 		}
 	}
-}
-
-func (n *Node) Members() []*Member {
-	return n.members
-}
-
-func (n *Node) Attributes() []*NodeAttribute {
-	return n.attributes
 }

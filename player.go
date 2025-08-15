@@ -2,8 +2,6 @@ package main
 
 import (
 	"log"
-
-	"github.com/google/uuid"
 )
 
 // Player executes actions against the game state
@@ -13,8 +11,8 @@ type Player struct {
 	QueuedActions []Action
 }
 
-func createPlayer(x, y int) *Player {
-	p := &Player{id: uuid.New().String(), x: x, y: y}
+func createPlayer(id string, x, y int) *Player {
+	p := &Player{id: id, x: x, y: y}
 
 	return p
 }
