@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"fmt"
 	"log"
 	"math/rand"
 	"net/http"
@@ -15,12 +14,13 @@ import (
 )
 
 const (
-	GridWidth       = 100
-	GridHeight      = 100
+	GridWidth       = 1000
+	GridHeight      = 1000
 	TickRate        = time.Second
 	SpawnUnits      = 3
 	ResourceDensity = 0.15
-	MinSpawnDist    = 20
+	MinSpawnDist    = 30
+	VisionRadius    = 10
 )
 
 // Graph is a 2D grid of nodes.
@@ -55,37 +55,22 @@ func buildGraph(w, h int) Graph {
 }
 
 // findSafeSpawn returns coordinates at least minDist tiles from any existing member.
-func findSafeSpawn(graph Graph, minDist int) (int, int) {
+func findSafeSpawn(graph Graph, members map[string]*Member, minDist int) (int, int) {
 	sizeX := graph.SizeX()
 	sizeY := graph.SizeY()
 	for {
 		x := rand.Intn(sizeX)
 		y := rand.Intn(sizeY)
-
-		type point struct{ x, y, d int }
-		visited := make([][]bool, sizeX)
-		for i := range visited {
-			visited[i] = make([]bool, sizeY)
-		}
-		queue := []point{{x, y, 0}}
-		found := false
-		for len(queue) > 0 {
-			p := queue[0]
-			queue = queue[1:]
-			if p.x < 0 || p.x >= sizeX || p.y < 0 || p.y >= sizeY || visited[p.x][p.y] || p.d > minDist {
-				continue
-			}
-			visited[p.x][p.y] = true
-			if p.d > 0 && len(graph[p.x][p.y].Members) > 0 {
-				found = true
+		safe := true
+		for _, m := range members {
+			dx := m.x - x
+			dy := m.y - y
+			if dx*dx+dy*dy < minDist*minDist {
+				safe = false
 				break
 			}
-			queue = append(queue, point{p.x + 1, p.y, p.d + 1})
-			queue = append(queue, point{p.x - 1, p.y, p.d + 1})
-			queue = append(queue, point{p.x, p.y + 1, p.d + 1})
-			queue = append(queue, point{p.x, p.y - 1, p.d + 1})
 		}
-		if !found {
+		if safe {
 			return x, y
 		}
 	}
@@ -95,7 +80,7 @@ func (s *State) addPlayer(id string) *Player {
 	player := createPlayer(id)
 	s.players[id] = player
 
-	x, y := findSafeSpawn(s.graph, MinSpawnDist)
+	x, y := findSafeSpawn(s.graph, s.members, MinSpawnDist)
 
 	for i := 0; i < SpawnUnits; i++ {
 		sx := clamp(x+rand.Intn(3)-1, 0, GridWidth-1)
@@ -164,7 +149,7 @@ func (s *State) tick() {
 		}
 	}
 
-	// Mine resources: idle units on resource tiles earn resources for their owner
+	// Mine resources: idle units on resource tiles deplete the node
 	for _, m := range s.members {
 		if m.HasTarget || m.Typ != "unit" {
 			continue
@@ -174,7 +159,11 @@ func (s *State) tick() {
 			continue
 		}
 		if player := s.players[m.OwnerID]; player != nil {
-			player.Resources[string(node.Resource)]++
+			resType := string(node.Resource)
+			mined := node.Deplete(1)
+			if mined > 0 {
+				player.Resources[resType] += mined
+			}
 		}
 	}
 
@@ -182,24 +171,70 @@ func (s *State) tick() {
 	s.broadcast()
 }
 
+// VisibleNode is a single tile sent to a client within their fog of war.
+type VisibleNode struct {
+	X        int          `json:"x"`
+	Y        int          `json:"y"`
+	Members  []*Member    `json:"m,omitempty"`
+	Resource ResourceType `json:"r,omitempty"`
+	Supply   int          `json:"s,omitempty"`
+}
+
+// visibleTiles computes all tiles within VisionRadius of any of the player's units.
+func (s *State) visibleTiles(playerID string) []VisibleNode {
+	seen := make(map[[2]int]bool)
+	for _, m := range s.members {
+		if m.OwnerID != playerID {
+			continue
+		}
+		x0 := clamp(m.x-VisionRadius, 0, GridWidth-1)
+		x1 := clamp(m.x+VisionRadius, 0, GridWidth-1)
+		y0 := clamp(m.y-VisionRadius, 0, GridHeight-1)
+		y1 := clamp(m.y+VisionRadius, 0, GridHeight-1)
+		for x := x0; x <= x1; x++ {
+			for y := y0; y <= y1; y++ {
+				dx := x - m.x
+				dy := y - m.y
+				if dx*dx+dy*dy <= VisionRadius*VisionRadius {
+					seen[[2]int{x, y}] = true
+				}
+			}
+		}
+	}
+
+	tiles := make([]VisibleNode, 0, len(seen))
+	for coord := range seen {
+		node := s.graph[coord[0]][coord[1]]
+		tiles = append(tiles, VisibleNode{
+			X:        coord[0],
+			Y:        coord[1],
+			Members:  node.Members,
+			Resource: node.Resource,
+			Supply:   node.Supply,
+		})
+	}
+	return tiles
+}
+
 func (s *State) broadcast() {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-
-	graphData, err := json.Marshal(s.graph)
-	if err != nil {
-		log.Println("broadcast marshal error:", err)
-		return
-	}
 
 	for pid, conn := range s.conns {
 		player := s.players[pid]
 		if player == nil {
 			continue
 		}
-		playerData, _ := json.Marshal(player)
-		msg := fmt.Sprintf(`{"graph":%s,"player":%s}`, string(graphData), string(playerData))
-		if err := conn.WriteMessage(websocket.TextMessage, []byte(msg)); err != nil {
+		tiles := s.visibleTiles(pid)
+		msg, err := json.Marshal(map[string]interface{}{
+			"v": tiles,
+			"p": player,
+		})
+		if err != nil {
+			log.Println("broadcast marshal error:", err)
+			continue
+		}
+		if err := conn.WriteMessage(websocket.TextMessage, msg); err != nil {
 			log.Println("write error for", pid, err)
 		}
 	}
@@ -215,7 +250,7 @@ type ClientAction struct {
 
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  4096,
-	WriteBufferSize: 4096,
+	WriteBufferSize: 65536,
 	CheckOrigin:     func(r *http.Request) bool { return true },
 }
 
@@ -247,18 +282,19 @@ func socketHandler(state *State) http.HandlerFunc {
 				break
 			}
 		}
+
+		// Build initial visible tiles
+		tiles := state.visibleTiles(playerID)
 		state.mu.Unlock()
 
-		// Send init message with spawn position
-		state.mu.RLock()
+		// Send init message with spawn position and visible area
 		initMsg, _ := json.Marshal(map[string]interface{}{
 			"type":   "init",
 			"spawnX": spawnX,
 			"spawnY": spawnY,
-			"graph":  state.graph,
-			"player": player,
+			"v":      tiles,
+			"p":      player,
 		})
-		state.mu.RUnlock()
 		conn.WriteMessage(websocket.TextMessage, initMsg)
 
 		// Read loop: process player actions
@@ -296,12 +332,14 @@ func socketHandler(state *State) http.HandlerFunc {
 }
 
 func main() {
+	log.Println("building graph...")
 	state := &State{
 		players: make(map[string]*Player),
 		graph:   buildGraph(GridWidth, GridHeight),
 		members: make(map[string]*Member),
 		conns:   make(map[string]*websocket.Conn),
 	}
+	log.Println("graph ready")
 
 	r := chi.NewRouter()
 	r.Use(cors.Handler(cors.Options{

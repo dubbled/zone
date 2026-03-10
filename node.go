@@ -4,12 +4,14 @@ package main
 type Node struct {
 	Members  []*Member    `json:"m"`
 	Resource ResourceType `json:"r,omitempty"`
+	Supply   int          `json:"s,omitempty"`
 }
 
 func createNode(resource ResourceType) *Node {
 	return &Node{
 		Members:  []*Member{},
 		Resource: resource,
+		Supply:   supplyForResource(resource),
 	}
 }
 
@@ -24,4 +26,22 @@ func (n *Node) RemoveMember(m *Member) {
 			return
 		}
 	}
+}
+
+// Deplete reduces supply by amount and returns actual amount mined.
+// When supply hits zero, the resource is cleared.
+func (n *Node) Deplete(amount int) int {
+	if n.Resource == ResourceNone || n.Supply <= 0 {
+		return 0
+	}
+	mined := amount
+	if mined > n.Supply {
+		mined = n.Supply
+	}
+	n.Supply -= mined
+	if n.Supply <= 0 {
+		n.Resource = ResourceNone
+		n.Supply = 0
+	}
+	return mined
 }
