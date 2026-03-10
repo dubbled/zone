@@ -1,12 +1,12 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"log"
 	"math/rand"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi"
@@ -14,76 +14,54 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+const (
+	GridWidth       = 100
+	GridHeight      = 100
+	TickRate        = time.Second
+	SpawnUnits      = 3
+	ResourceDensity = 0.15
+	MinSpawnDist    = 20
+)
+
+// Graph is a 2D grid of nodes.
 type Graph [][]*Node
 
+func (g Graph) SizeX() int { return len(g) }
+func (g Graph) SizeY() int { return len(g[0]) }
+
+// State holds all game state.
 type State struct {
+	mu      sync.RWMutex
 	players map[string]*Player
 	graph   Graph
-}
-
-func (s *State) AddPlayer(p *Player) {
-	s.players[p.id] = p
-
-	node := s.graph[p.x][p.y]
-	member := createMember("player", node, p)
-
-	s.graph[p.x][p.y].AddMember(member)
-}
-
-// An action is an action that a player takes to modify the state
-// Actions can be executed over a number of ticks
-// Copmlex actions will be reduced by each turn
-type Action struct{}
-
-func validateAction(a Action) error {
-	return nil
+	members map[string]*Member
+	conns   map[string]*websocket.Conn
 }
 
 func buildGraph(w, h int) Graph {
 	graph := make(Graph, w)
-	for row, _ := range graph {
-		graph[row] = make([]*Node, h)
-		column := graph[row]
-		for index, _ := range column {
-			column[index] = createNode()
+	types := []ResourceType{ResourceWater, ResourceWood, ResourceMetal}
+	for x := range graph {
+		graph[x] = make([]*Node, h)
+		for y := range graph[x] {
+			resource := ResourceNone
+			if rand.Float64() < ResourceDensity {
+				resource = types[rand.Intn(len(types))]
+			}
+			graph[x][y] = createNode(resource)
 		}
 	}
-
 	return graph
 }
 
-func (g Graph) SizeX() int {
-	return len(g)
-}
-
-func (g Graph) SizeY() int {
-	return len(g[0])
-}
-
-func (s *State) tick() {
-	for _, p := range s.players {
-		node := s.graph[p.x][p.y]
-		member := createMember("unit", node, p)
-		node.AddMember(member)
-	}
-}
-
-// Helper to check if a node has a member
-func nodeHasMember(n *Node) bool {
-	return len(n.Members) > 0
-}
-
-// Find a random point at least minDist away from all players
+// findSafeSpawn returns coordinates at least minDist tiles from any existing member.
 func findSafeSpawn(graph Graph, minDist int) (int, int) {
-	sizeX := len(graph)
-	sizeY := len(graph[0])
-	tryCount := 0
+	sizeX := graph.SizeX()
+	sizeY := graph.SizeY()
 	for {
-		tryCount++
 		x := rand.Intn(sizeX)
 		y := rand.Intn(sizeY)
 
-		// BFS to check for any player within minDist
 		type point struct{ x, y, d int }
 		visited := make([][]bool, sizeX)
 		for i := range visited {
@@ -98,159 +76,255 @@ func findSafeSpawn(graph Graph, minDist int) (int, int) {
 				continue
 			}
 			visited[p.x][p.y] = true
-			if p.d > 0 && nodeHasMember(graph[p.x][p.y]) {
+			if p.d > 0 && len(graph[p.x][p.y].Members) > 0 {
 				found = true
 				break
 			}
-			// Add neighbors
 			queue = append(queue, point{p.x + 1, p.y, p.d + 1})
 			queue = append(queue, point{p.x - 1, p.y, p.d + 1})
 			queue = append(queue, point{p.x, p.y + 1, p.d + 1})
 			queue = append(queue, point{p.x, p.y - 1, p.d + 1})
 		}
 		if !found {
-			fmt.Println("found safe spawn", x, y)
 			return x, y
 		}
-		// else, try again
 	}
 }
 
-func socketHandler(state *State) func(http.ResponseWriter, *http.Request) {
-	return func(w http.ResponseWriter, r *http.Request) {
-		playerID := chi.URLParam(r, "playerID")
-		log.Println("got request for playerID", playerID)
+func (s *State) addPlayer(id string) *Player {
+	player := createPlayer(id)
+	s.players[id] = player
 
-		fmt.Println(state.players)
+	x, y := findSafeSpawn(s.graph, MinSpawnDist)
 
-		player := state.players[playerID]
-		if player == nil {
-			fmt.Println("finding safe spawn for player")
-			x, y := findSafeSpawn(state.graph, 30)
-			player = createPlayer(playerID, x, y)
-			state.AddPlayer(player)
+	for i := 0; i < SpawnUnits; i++ {
+		sx := clamp(x+rand.Intn(3)-1, 0, GridWidth-1)
+		sy := clamp(y+rand.Intn(3)-1, 0, GridHeight-1)
+		m := createMember("unit", id, sx, sy, s.graph[sx][sy])
+		s.members[m.ID] = m
+	}
+
+	return player
+}
+
+func clamp(v, lo, hi int) int {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
+}
+
+func sign(x int) int {
+	if x > 0 {
+		return 1
+	}
+	if x < 0 {
+		return -1
+	}
+	return 0
+}
+
+func (s *State) tick() {
+	s.mu.Lock()
+
+	// Collect movements
+	type movement struct {
+		member       *Member
+		fromX, fromY int
+		toX, toY     int
+	}
+	var moves []movement
+
+	for _, m := range s.members {
+		if !m.HasTarget {
+			continue
 		}
-
-		conn, err := upgrader.Upgrade(w, r, nil)
-		if err != nil {
-			log.Println(err)
-			return
-		}
-
-		ctx, cancel := context.WithCancel(r.Context())
-
-		type SocketMessage struct {
-			Graph [][]*Node `json:"graph"`
-		}
-
-		type SocketError struct {
-			Error string `json:"error"`
-		}
-
-		// write to the socket
-		go func() {
-			outErrCount := 0
-
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				default:
-					msg := SocketMessage{Graph: state.graph}
-					out, err := json.Marshal(msg)
-					if err != nil {
-						conn.WriteMessage(websocket.TextMessage, []byte(err.Error()))
-					}
-
-					err = conn.WriteMessage(websocket.TextMessage, []byte(out))
-					// TODO: threshold fail?
-					if err != nil {
-						log.Println(err)
-						outErrCount++
-						if outErrCount > 5 {
-							cancel()
-							return
-						}
-					}
-					time.Sleep(time.Second * 1)
-				}
-			}
-		}()
-
-		// read from the socket
-		for {
-			select {
-			case <-ctx.Done():
-				return
-
-			default:
-				_, message, err := conn.ReadMessage()
-				if err != nil {
-					log.Println(err)
-					return
-				}
-
-				actions := []Action{}
-				err = json.Unmarshal(message, &actions)
-				if err != nil {
-					socketError := SocketError{Error: err.Error()}
-					conn.WriteMessage(websocket.TextMessage, []byte(socketError.Error))
-					continue
-				}
-
-				for _, action := range actions {
-					player.QueueAction(action)
-				}
-			}
+		dx := sign(m.TargetX - m.x)
+		dy := sign(m.TargetY - m.y)
+		newX := clamp(m.x+dx, 0, GridWidth-1)
+		newY := clamp(m.y+dy, 0, GridHeight-1)
+		if newX != m.x || newY != m.y {
+			moves = append(moves, movement{m, m.x, m.y, newX, newY})
 		}
 	}
+
+	// Apply movements
+	for _, mv := range moves {
+		s.graph[mv.fromX][mv.fromY].RemoveMember(mv.member)
+		mv.member.x = mv.toX
+		mv.member.y = mv.toY
+		mv.member.node = s.graph[mv.toX][mv.toY]
+		s.graph[mv.toX][mv.toY].AddMember(mv.member)
+
+		if mv.member.x == mv.member.TargetX && mv.member.y == mv.member.TargetY {
+			mv.member.HasTarget = false
+		}
+	}
+
+	// Mine resources: idle units on resource tiles earn resources for their owner
+	for _, m := range s.members {
+		if m.HasTarget || m.Typ != "unit" {
+			continue
+		}
+		node := s.graph[m.x][m.y]
+		if node.Resource == ResourceNone {
+			continue
+		}
+		if player := s.players[m.OwnerID]; player != nil {
+			player.Resources[string(node.Resource)]++
+		}
+	}
+
+	s.mu.Unlock()
+	s.broadcast()
+}
+
+func (s *State) broadcast() {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	graphData, err := json.Marshal(s.graph)
+	if err != nil {
+		log.Println("broadcast marshal error:", err)
+		return
+	}
+
+	for pid, conn := range s.conns {
+		player := s.players[pid]
+		if player == nil {
+			continue
+		}
+		playerData, _ := json.Marshal(player)
+		msg := fmt.Sprintf(`{"graph":%s,"player":%s}`, string(graphData), string(playerData))
+		if err := conn.WriteMessage(websocket.TextMessage, []byte(msg)); err != nil {
+			log.Println("write error for", pid, err)
+		}
+	}
+}
+
+// ClientAction is a command sent by a player over WebSocket.
+type ClientAction struct {
+	Type     string `json:"type"`
+	MemberID string `json:"member_id"`
+	X        int    `json:"x"`
+	Y        int    `json:"y"`
 }
 
 var upgrader = websocket.Upgrader{
-	ReadBufferSize:  1024,
-	WriteBufferSize: 1024,
-	CheckOrigin: func(r *http.Request) bool {
-		return true
-	},
+	ReadBufferSize:  4096,
+	WriteBufferSize: 4096,
+	CheckOrigin:     func(r *http.Request) bool { return true },
+}
+
+func socketHandler(state *State) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		playerID := chi.URLParam(r, "playerID")
+		log.Println("player connecting:", playerID)
+
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			log.Println("upgrade error:", err)
+			return
+		}
+		defer conn.Close()
+
+		state.mu.Lock()
+		player := state.players[playerID]
+		if player == nil {
+			player = state.addPlayer(playerID)
+		}
+		state.conns[playerID] = conn
+
+		// Find spawn position for camera
+		var spawnX, spawnY int
+		for _, m := range state.members {
+			if m.OwnerID == playerID {
+				spawnX = m.x
+				spawnY = m.y
+				break
+			}
+		}
+		state.mu.Unlock()
+
+		// Send init message with spawn position
+		state.mu.RLock()
+		initMsg, _ := json.Marshal(map[string]interface{}{
+			"type":   "init",
+			"spawnX": spawnX,
+			"spawnY": spawnY,
+			"graph":  state.graph,
+			"player": player,
+		})
+		state.mu.RUnlock()
+		conn.WriteMessage(websocket.TextMessage, initMsg)
+
+		// Read loop: process player actions
+		for {
+			_, message, err := conn.ReadMessage()
+			if err != nil {
+				log.Println("read error:", err)
+				break
+			}
+
+			var action ClientAction
+			if err := json.Unmarshal(message, &action); err != nil {
+				log.Println("unmarshal error:", err)
+				continue
+			}
+
+			state.mu.Lock()
+			switch action.Type {
+			case "move":
+				if member := state.members[action.MemberID]; member != nil && member.OwnerID == playerID {
+					member.TargetX = clamp(action.X, 0, GridWidth-1)
+					member.TargetY = clamp(action.Y, 0, GridHeight-1)
+					member.HasTarget = true
+				}
+			}
+			state.mu.Unlock()
+		}
+
+		// Cleanup on disconnect
+		state.mu.Lock()
+		delete(state.conns, playerID)
+		state.mu.Unlock()
+		log.Println("player disconnected:", playerID)
+	}
 }
 
 func main() {
-	w, h := 100, 100
-	graph := buildGraph(w, h)
-	state := &State{graph: graph, players: map[string]*Player{}}
+	state := &State{
+		players: make(map[string]*Player),
+		graph:   buildGraph(GridWidth, GridHeight),
+		members: make(map[string]*Member),
+		conns:   make(map[string]*websocket.Conn),
+	}
 
-	// Initialize a fake seed player at random coordinates
-	x := rand.Intn(w)
-	y := rand.Intn(h)
-	seed := createPlayer("seed", x, y)
-	state.AddPlayer(seed)
+	r := chi.NewRouter()
+	r.Use(cors.Handler(cors.Options{
+		AllowedOrigins:   []string{"*"},
+		AllowedMethods:   []string{"GET", "POST", "OPTIONS"},
+		AllowedHeaders:   []string{"*"},
+		AllowCredentials: false,
+		MaxAge:           300,
+	}))
+
+	r.Get("/ws/{playerID}", socketHandler(state))
+	r.Handle("/*", http.FileServer(http.Dir("./static")))
 
 	go func() {
-		// Serve static files from the "./static" directory
-		r := chi.NewRouter()
-
-		r.Use(cors.Handler(cors.Options{
-			AllowedOrigins:   []string{"https://*", "http://*"},
-			AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-			AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-CSRF-Token"},
-			ExposedHeaders:   []string{"Link"},
-			AllowCredentials: false,
-			MaxAge:           300,
-		}))
-
-		fs := http.FileServer(http.Dir("./static"))
-		http.Handle("/", fs)
-
-		r.Get("/updates/{playerID}", socketHandler(state))
-
-		log.Println("Starting server at port 8080")
+		log.Println("server starting on :8080")
 		if err := http.ListenAndServe(":8080", r); err != nil {
 			log.Fatal(err)
 		}
 	}()
 
-	for {
+	// Game loop
+	ticker := time.NewTicker(TickRate)
+	for range ticker.C {
 		state.tick()
-		time.Sleep(time.Second * 1)
 	}
 }

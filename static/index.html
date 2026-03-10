@@ -1,134 +1,332 @@
 <!DOCTYPE html>
 <html lang="en">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Canvas Grid Example</title>
-        <style>
-            body { margin: 0; }
-            #container { position: relative; width: 100vw; height: 100vh; overflow: auto; }
-            canvas { position: absolute; left: 0; top: 0; display: block; }
-            header { 
-                width: 100%;
-                background-color: #1c1c1c;
-                color: white;
-                padding: 10px;
-                position: fixed;
-                z-index: 5;
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Zone</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #0a0a1a; overflow: hidden; font-family: 'Courier New', monospace; }
+        canvas { display: block; cursor: crosshair; }
+        #hud {
+            position: fixed; top: 0; left: 0; right: 0;
+            padding: 10px 16px;
+            background: rgba(10, 10, 26, 0.92);
+            color: #ccc; display: flex; gap: 24px; align-items: center;
+            border-bottom: 1px solid #2a2a4a;
+            font-size: 14px; z-index: 10;
+        }
+        .res { display: flex; align-items: center; gap: 6px; }
+        .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+        #info {
+            position: fixed; bottom: 12px; left: 12px;
+            color: #555; font-size: 11px; z-index: 10;
+        }
+        #selected-info {
+            position: fixed; bottom: 12px; right: 12px;
+            color: #999; font-size: 12px; z-index: 10;
+            text-align: right;
+        }
+    </style>
+</head>
+<body>
+    <div id="hud">
+        <span style="color:#888; font-weight:bold;">ZONE</span>
+        <div class="res"><span class="dot" style="background:#4488cc"></span>Water: <span id="r-water">0</span></div>
+        <div class="res"><span class="dot" style="background:#44aa44"></span>Wood: <span id="r-wood">0</span></div>
+        <div class="res"><span class="dot" style="background:#7788aa"></span>Metal: <span id="r-metal">0</span></div>
+        <div style="margin-left:auto; color:#888;">Units: <span id="unit-count">0</span></div>
+    </div>
+    <canvas id="game"></canvas>
+    <div id="info">WASD to pan &middot; Scroll to zoom &middot; Click unit to select &middot; Right-click to move</div>
+    <div id="selected-info"></div>
+
+    <script>
+    const canvas = document.getElementById('game');
+    const ctx = canvas.getContext('2d');
+
+    function resize() {
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+    }
+    window.addEventListener('resize', resize);
+    resize();
+
+    // Constants
+    const TILE = 32;
+    const GW = 100, GH = 100;
+
+    const TILE_COLORS = {
+        '':      '#16162a',
+        'water': '#12304a',
+        'wood':  '#1a3318',
+        'metal': '#252535',
+    };
+    const TILE_BORDERS = {
+        'water': '#2a6090',
+        'wood':  '#2a6630',
+        'metal': '#4a4a60',
+    };
+
+    // Camera
+    const cam = { x: 0, y: 0, zoom: 1.0 };
+
+    // Game state
+    let graph = null;
+    let player = null;
+    let selectedUnit = null;
+    let playerID = localStorage.getItem('playerID');
+    let ws = null;
+
+    if (!playerID) {
+        playerID = prompt('Enter your player name:');
+        if (playerID) localStorage.setItem('playerID', playerID);
+    }
+
+    // Input
+    const keys = {};
+    window.addEventListener('keydown', e => { keys[e.key.toLowerCase()] = true; });
+    window.addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; });
+
+    function screenToTile(sx, sy) {
+        const ts = TILE * cam.zoom;
+        return {
+            x: Math.floor((sx + cam.x) / ts),
+            y: Math.floor((sy + cam.y) / ts),
+        };
+    }
+
+    function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+    // Click: select own unit
+    canvas.addEventListener('click', e => {
+        if (!graph) return;
+        const t = screenToTile(e.clientX, e.clientY);
+        if (t.x < 0 || t.x >= GW || t.y < 0 || t.y >= GH) return;
+
+        const node = graph[t.x]?.[t.y];
+        if (!node || !node.m) { selectedUnit = null; return; }
+
+        const unit = node.m.find(m => m.owner === playerID);
+        selectedUnit = unit ? unit.id : null;
+        updateSelectedInfo();
+    });
+
+    // Right-click: move selected unit
+    canvas.addEventListener('contextmenu', e => {
+        e.preventDefault();
+        if (!selectedUnit || !ws || ws.readyState !== WebSocket.OPEN) return;
+
+        const t = screenToTile(e.clientX, e.clientY);
+        ws.send(JSON.stringify({
+            type: 'move',
+            member_id: selectedUnit,
+            x: clamp(t.x, 0, GW - 1),
+            y: clamp(t.y, 0, GH - 1),
+        }));
+    });
+
+    // Zoom toward mouse
+    canvas.addEventListener('wheel', e => {
+        e.preventDefault();
+        const oldZoom = cam.zoom;
+        cam.zoom *= e.deltaY < 0 ? 1.12 : 0.89;
+        cam.zoom = clamp(cam.zoom, 0.15, 5);
+        const factor = cam.zoom / oldZoom;
+        cam.x = e.clientX * (factor - 1) + cam.x * factor;
+        cam.y = e.clientY * (factor - 1) + cam.y * factor;
+    }, { passive: false });
+
+    function updateSelectedInfo() {
+        const el = document.getElementById('selected-info');
+        if (!selectedUnit) { el.textContent = ''; return; }
+        el.textContent = 'Selected: ' + selectedUnit;
+    }
+
+    // WebSocket
+    function connect() {
+        if (!playerID) return;
+        const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+        ws = new WebSocket(`${proto}//${location.host}/ws/${playerID}`);
+
+        ws.onmessage = e => {
+            const data = JSON.parse(e.data);
+            if (data.graph) graph = data.graph;
+            if (data.player) {
+                player = data.player;
+                document.getElementById('r-water').textContent = player.resources.water || 0;
+                document.getElementById('r-wood').textContent = player.resources.wood || 0;
+                document.getElementById('r-metal').textContent = player.resources.metal || 0;
             }
-        </style>
-    </head>
-
-    <body>
-        <div id="container">
-            <!-- <header>
-                <button>Connect</button>
-                <button>Disconnect</button>
-            </header> -->
-            <canvas id="grid-canvas"></canvas>
-            <canvas id="circle-canvas"></canvas>
-        </div>
-        <script>
-            const WIDTH = 20000;
-            const HEIGHT = 20000;
-            const GRID_SIZE = 10;
-
-            // Set up canvases
-            const gridCanvas = document.getElementById('grid-canvas');
-            const circleCanvas = document.getElementById('circle-canvas');
-            gridCanvas.width = circleCanvas.width = WIDTH;
-            gridCanvas.height = circleCanvas.height = HEIGHT;
-
-            // Position canvases absolutely
-            gridCanvas.style.zIndex = 0;
-            circleCanvas.style.zIndex = 1;
-
-            // Draw grid
-            const drawGrid = (ctx) => {
-                ctx.clearRect(0, 0, WIDTH, HEIGHT);
-                ctx.strokeStyle = 'gray';
-                ctx.lineWidth = 1;
-                for (let i = 0; i <= HEIGHT / GRID_SIZE; i++) {
-                    ctx.beginPath();
-                    ctx.moveTo(0, i * GRID_SIZE);
-                    ctx.lineTo(WIDTH, i * GRID_SIZE);
-                    ctx.stroke();
-                }
-                for (let j = 0; j <= WIDTH / GRID_SIZE; j++) {
-                    ctx.beginPath();
-                    ctx.moveTo(j * GRID_SIZE, 0);
-                    ctx.lineTo(j * GRID_SIZE, HEIGHT);
-                    ctx.stroke();
-                }
+            if (data.type === 'init' && data.spawnX !== undefined) {
+                cam.x = data.spawnX * TILE * cam.zoom - canvas.width / 2;
+                cam.y = data.spawnY * TILE * cam.zoom - canvas.height / 2;
             }
+        };
 
-            // Draw circles based on graph state
-            const drawGraphMembers = (ctx, graph) => {
-                ctx.clearRect(0, 0, WIDTH, HEIGHT);
-                if (!Array.isArray(graph)) return;
-                for (let x = 0; x < graph.length; x++) {
-                    for (let y = 0; y < graph[x].length; y++) {
-                        const node = graph[x][y];
-                        if (!node || !Array.isArray(node.m)) continue;
-                        const cx = x * GRID_SIZE + GRID_SIZE / 2;
-                        const cy = y * GRID_SIZE + GRID_SIZE / 2;
-                        // Draw a circle for each member
-                        for (const member of node.m) {
-                            ctx.beginPath();
-                            ctx.arc(cx, cy, 3, 0, 2 * Math.PI);
-                            ctx.fillStyle = member.typ === 'player' ? 'red' : 'blue';
-                            ctx.fill();
-                            ctx.strokeStyle = 'black';
+        ws.onclose = () => {
+            console.log('disconnected, reconnecting...');
+            setTimeout(connect, 2000);
+        };
+        ws.onerror = () => {};
+    }
+    connect();
+
+    // Render
+    function render() {
+        // Camera movement
+        const speed = 10 / cam.zoom;
+        if (keys['w'] || keys['arrowup'])    cam.y -= speed;
+        if (keys['s'] || keys['arrowdown'])  cam.y += speed;
+        if (keys['a'] || keys['arrowleft'])  cam.x -= speed;
+        if (keys['d'] || keys['arrowright']) cam.x += speed;
+
+        const ts = TILE * cam.zoom;
+
+        ctx.fillStyle = '#0a0a1a';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        if (!graph) {
+            ctx.fillStyle = '#555';
+            ctx.font = '16px monospace';
+            ctx.fillText('Connecting...', canvas.width / 2 - 50, canvas.height / 2);
+            requestAnimationFrame(render);
+            return;
+        }
+
+        // Visible tile range
+        const x0 = Math.max(0, Math.floor(cam.x / ts));
+        const y0 = Math.max(0, Math.floor(cam.y / ts));
+        const x1 = Math.min(GW, Math.ceil((cam.x + canvas.width) / ts));
+        const y1 = Math.min(GH, Math.ceil((cam.y + canvas.height) / ts));
+
+        let unitCount = 0;
+
+        for (let x = x0; x < x1; x++) {
+            for (let y = y0; y < y1; y++) {
+                const node = graph[x]?.[y];
+                if (!node) continue;
+
+                const sx = x * ts - cam.x;
+                const sy = y * ts - cam.y;
+                const r = node.r || '';
+
+                // Tile fill
+                ctx.fillStyle = TILE_COLORS[r] || TILE_COLORS[''];
+                ctx.fillRect(sx, sy, ts, ts);
+
+                // Resource border
+                if (r && TILE_BORDERS[r]) {
+                    ctx.strokeStyle = TILE_BORDERS[r];
+                    ctx.lineWidth = 1;
+                    ctx.strokeRect(sx + 0.5, sy + 0.5, ts - 1, ts - 1);
+                }
+
+                // Grid line
+                ctx.strokeStyle = '#1a1a30';
+                ctx.lineWidth = 0.5;
+                ctx.strokeRect(sx, sy, ts, ts);
+
+                // Members
+                if (node.m && node.m.length > 0) {
+                    const count = node.m.length;
+                    node.m.forEach((member, i) => {
+                        // Offset multiple units so they don't overlap
+                        const offsetX = count > 1 ? (i - (count - 1) / 2) * ts * 0.2 : 0;
+                        const cx = sx + ts / 2 + offsetX;
+                        const cy = sy + ts / 2;
+                        const radius = ts * 0.25;
+
+                        const isOwn = member.owner === playerID;
+                        if (isOwn) unitCount++;
+
+                        // Shadow
+                        ctx.beginPath();
+                        ctx.arc(cx + 1, cy + 1, radius, 0, Math.PI * 2);
+                        ctx.fillStyle = 'rgba(0,0,0,0.3)';
+                        ctx.fill();
+
+                        // Unit circle
+                        ctx.beginPath();
+                        ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+                        ctx.fillStyle = isOwn ? '#44cc66' : '#cc4444';
+                        ctx.fill();
+
+                        // Selection glow
+                        if (member.id === selectedUnit) {
+                            ctx.strokeStyle = '#ffcc00';
+                            ctx.lineWidth = 2.5;
                             ctx.stroke();
                         }
+
+                        // Moving indicator ring
+                        if (member.moving) {
+                            ctx.beginPath();
+                            ctx.arc(cx, cy, radius + 3, 0, Math.PI * 2);
+                            ctx.strokeStyle = isOwn ? 'rgba(68,204,102,0.4)' : 'rgba(204,68,68,0.3)';
+                            ctx.lineWidth = 1;
+                            ctx.stroke();
+                        }
+
+                        // Resource mining indicator (idle on resource tile)
+                        if (!member.moving && isOwn && r) {
+                            ctx.beginPath();
+                            ctx.arc(cx, cy, radius + 2, 0, Math.PI * 2);
+                            ctx.strokeStyle = 'rgba(255,255,255,0.2)';
+                            ctx.lineWidth = 1;
+                            ctx.setLineDash([2, 2]);
+                            ctx.stroke();
+                            ctx.setLineDash([]);
+                        }
+                    });
+                }
+
+                // Resource icon (small letter) at zoom > 0.6
+                if (r && ts > 18) {
+                    ctx.fillStyle = TILE_BORDERS[r];
+                    ctx.globalAlpha = 0.5;
+                    ctx.font = `${Math.max(8, ts * 0.3)}px monospace`;
+                    ctx.textAlign = 'center';
+                    ctx.textBaseline = 'bottom';
+                    const label = r === 'water' ? 'W' : r === 'wood' ? 'T' : 'M';
+                    ctx.fillText(label, sx + ts / 2, sy + ts - 2);
+                    ctx.globalAlpha = 1;
+                    ctx.textAlign = 'start';
+                    ctx.textBaseline = 'alphabetic';
+                }
+            }
+        }
+
+        document.getElementById('unit-count').textContent = unitCount;
+
+        // Draw move target line for selected unit
+        if (selectedUnit && graph) {
+            for (let x = x0; x < x1; x++) {
+                for (let y = y0; y < y1; y++) {
+                    const node = graph[x]?.[y];
+                    if (!node?.m) continue;
+                    const member = node.m.find(m => m.id === selectedUnit);
+                    if (member && member.moving) {
+                        const fromX = x * ts - cam.x + ts / 2;
+                        const fromY = y * ts - cam.y + ts / 2;
+                        const toX = member.tx * ts - cam.x + ts / 2;
+                        const toY = member.ty * ts - cam.y + ts / 2;
+                        ctx.beginPath();
+                        ctx.moveTo(fromX, fromY);
+                        ctx.lineTo(toX, toY);
+                        ctx.strokeStyle = 'rgba(255,204,0,0.3)';
+                        ctx.lineWidth = 1;
+                        ctx.setLineDash([4, 4]);
+                        ctx.stroke();
+                        ctx.setLineDash([]);
                     }
                 }
             }
+        }
 
-            drawGrid(gridCanvas.getContext('2d'));
-
-            // Connect to backend and update graph
-            const connectToGameUpdates = (playerID) => {
-                const wsUrl = `ws://localhost:8080/updates/${playerID}`;
-                const ws = new WebSocket(wsUrl);
-
-                ws.onopen = () => {
-                    console.log('WebSocket connected');
-                };
-
-                ws.onmessage = (event) => {
-                    try {
-                        const data = JSON.parse(event.data);
-                        if (data.graph) {
-                            drawGraphMembers(circleCanvas.getContext('2d'), data.graph);
-                        }
-                    } catch (e) {
-                        console.error('Error parsing message', e);
-                    }
-                };
-
-                ws.onerror = (err) => {
-                    console.error('WebSocket error', err);
-                };
-
-                ws.onclose = () => {
-                    console.log('WebSocket closed, retrying in 2s...');
-                    setTimeout(() => connectToGameUpdates(playerID), 2000);
-                };
-
-                // Optionally, expose ws for sending actions
-                window.gameSocket = ws;
-            }
-
-            // Example: prompt for playerID and connect
-            let playerID = localStorage.getItem('playerID');
-            if (!playerID) {
-                playerID = prompt('Enter your player ID:');
-                if (playerID) localStorage.setItem('playerID', playerID);
-            }
-            if (playerID) {
-                connectToGameUpdates(playerID);
-            }
-        </script>
-    </body>
+        requestAnimationFrame(render);
+    }
+    requestAnimationFrame(render);
+    </script>
+</body>
 </html>
