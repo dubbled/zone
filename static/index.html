@@ -38,7 +38,7 @@
         <div style="margin-left:auto; color:#888;">Units: <span id="unit-count">0</span></div>
     </div>
     <canvas id="game"></canvas>
-    <div id="info">WASD to pan &middot; Scroll to zoom &middot; Click unit to select &middot; Right-click to move</div>
+    <div id="info">WASD to pan &middot; Scroll to zoom &middot; Click unit to select &middot; Click tile to move</div>
     <div id="selected-info"></div>
 
     <script>
@@ -99,7 +99,10 @@
 
     // Input
     const keys = {};
-    window.addEventListener('keydown', e => { keys[e.key.toLowerCase()] = true; });
+    window.addEventListener('keydown', e => {
+        keys[e.key.toLowerCase()] = true;
+        if (e.key === 'Escape') { selectedUnit = null; updateSelectedInfo(); }
+    });
     window.addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; });
 
     function screenToTile(sx, sy) {
@@ -112,35 +115,78 @@
 
     function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 
-    // Click: select own unit
+    // Compute the tile-by-tile path matching server movement (diagonal then straight)
+    function computePath(fromX, fromY, toX, toY) {
+        const path = [];
+        let x = fromX, y = fromY;
+        while (x !== toX || y !== toY) {
+            x += Math.sign(toX - x);
+            y += Math.sign(toY - y);
+            path.push({ x, y });
+        }
+        return path;
+    }
+
+    // Find the selected unit's current position and data from the tile cache
+    function findSelectedMember() {
+        if (!selectedUnit) return null;
+        for (const [key, tile] of tileCache) {
+            if (!tile.m) continue;
+            const member = tile.m.find(m => m.id === selectedUnit);
+            if (member) {
+                const [x, y] = key.split(',').map(Number);
+                return { member, x, y };
+            }
+        }
+        return null;
+    }
+
+    // Two-phase click: select unit, then click destination to move
     canvas.addEventListener('click', e => {
         const t = screenToTile(e.clientX, e.clientY);
         const key = t.x + ',' + t.y;
         const tile = tileCache.get(key);
 
-        if (!tile || !tile.m || !currentVisible.has(key)) {
-            selectedUnit = null;
+        // If a unit is already selected, this click is a move command
+        if (selectedUnit) {
+            // Unless clicking another own unit — then reselect
+            if (tile && tile.m && currentVisible.has(key)) {
+                const ownUnit = tile.m.find(m => m.owner === playerID && m.id !== selectedUnit);
+                if (ownUnit) {
+                    selectedUnit = ownUnit.id;
+                    updateSelectedInfo();
+                    return;
+                }
+            }
+
+            // Send move command
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({
+                    type: 'move',
+                    member_id: selectedUnit,
+                    x: clamp(t.x, 0, GW - 1),
+                    y: clamp(t.y, 0, GH - 1),
+                }));
+            }
+            // Keep unit selected so path stays visible while it moves
             updateSelectedInfo();
             return;
         }
 
+        // No unit selected — try to select one
+        if (!tile || !tile.m || !currentVisible.has(key)) return;
         const unit = tile.m.find(m => m.owner === playerID);
-        selectedUnit = unit ? unit.id : null;
-        updateSelectedInfo();
+        if (unit) {
+            selectedUnit = unit.id;
+            updateSelectedInfo();
+        }
     });
 
-    // Right-click: move selected unit
+    // Right-click or Escape to deselect
     canvas.addEventListener('contextmenu', e => {
         e.preventDefault();
-        if (!selectedUnit || !ws || ws.readyState !== WebSocket.OPEN) return;
-
-        const t = screenToTile(e.clientX, e.clientY);
-        ws.send(JSON.stringify({
-            type: 'move',
-            member_id: selectedUnit,
-            x: clamp(t.x, 0, GW - 1),
-            y: clamp(t.y, 0, GH - 1),
-        }));
+        selectedUnit = null;
+        updateSelectedInfo();
     });
 
     // Zoom toward mouse
@@ -346,26 +392,50 @@
 
         document.getElementById('unit-count').textContent = unitCount;
 
-        // Draw move target line for selected unit
+        // Draw tile-by-tile path for the selected unit
         if (selectedUnit) {
-            for (const [key, tile] of tileCache) {
-                if (!tile.m) continue;
-                const member = tile.m.find(m => m.id === selectedUnit);
-                if (member && member.moving) {
-                    const [fx, fy] = key.split(',').map(Number);
-                    const fromX = fx * ts - cam.x + ts / 2;
-                    const fromY = fy * ts - cam.y + ts / 2;
-                    const toX = member.tx * ts - cam.x + ts / 2;
-                    const toY = member.ty * ts - cam.y + ts / 2;
+            const found = findSelectedMember();
+            if (found && found.member.moving) {
+                const path = computePath(found.x, found.y, found.member.tx, found.member.ty);
+
+                // Highlight each tile along the path
+                for (let i = 0; i < path.length; i++) {
+                    const px = path[i].x * ts - cam.x;
+                    const py = path[i].y * ts - cam.y;
+
+                    // Skip tiles fully off screen
+                    if (px + ts < 0 || px > canvas.width || py + ts < 0 || py > canvas.height) continue;
+
+                    // Path tile highlight (fades toward destination)
+                    const alpha = 0.15 + 0.15 * (1 - i / path.length);
+                    ctx.fillStyle = `rgba(255, 204, 0, ${alpha})`;
+                    ctx.fillRect(px + 1, py + 1, ts - 2, ts - 2);
+                }
+
+                // Draw connecting line through path centers
+                if (path.length > 0) {
                     ctx.beginPath();
-                    ctx.moveTo(fromX, fromY);
-                    ctx.lineTo(toX, toY);
-                    ctx.strokeStyle = 'rgba(255,204,0,0.35)';
+                    const startX = found.x * ts - cam.x + ts / 2;
+                    const startY = found.y * ts - cam.y + ts / 2;
+                    ctx.moveTo(startX, startY);
+                    for (const p of path) {
+                        ctx.lineTo(p.x * ts - cam.x + ts / 2, p.y * ts - cam.y + ts / 2);
+                    }
+                    ctx.strokeStyle = 'rgba(255, 204, 0, 0.4)';
                     ctx.lineWidth = 1.5;
-                    ctx.setLineDash([4, 4]);
+                    ctx.setLineDash([3, 3]);
                     ctx.stroke();
                     ctx.setLineDash([]);
-                    break;
+                }
+
+                // Destination marker
+                const dest = path[path.length - 1];
+                if (dest) {
+                    const dx = dest.x * ts - cam.x;
+                    const dy = dest.y * ts - cam.y;
+                    ctx.strokeStyle = 'rgba(255, 204, 0, 0.6)';
+                    ctx.lineWidth = 2;
+                    ctx.strokeRect(dx + 2, dy + 2, ts - 4, ts - 4);
                 }
             }
         }
