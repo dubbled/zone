@@ -6,39 +6,50 @@
     <title>Zone</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { background: #050510; overflow: hidden; font-family: 'Courier New', monospace; }
+        body { background: #000; overflow: hidden; font-family: 'Courier New', monospace; }
         canvas { display: block; cursor: crosshair; }
         #hud {
             position: fixed; top: 0; left: 0; right: 0;
-            padding: 10px 16px;
-            background: rgba(5, 5, 16, 0.94);
-            color: #ccc; display: flex; gap: 24px; align-items: center;
-            border-bottom: 1px solid #2a2a4a;
-            font-size: 14px; z-index: 10;
+            padding: 8px 20px;
+            background: transparent;
+            color: rgba(255,255,255,0.5); display: flex; gap: 28px; align-items: center;
+            border-bottom: 1px solid rgba(255,255,255,0.04);
+            font-size: 12px; z-index: 10;
+            letter-spacing: 0.5px;
+            text-transform: uppercase;
+        }
+        #hud .logo {
+            color: rgba(255,255,255,0.12); font-weight: 600;
+            font-size: 11px; letter-spacing: 3px;
         }
         .res { display: flex; align-items: center; gap: 6px; }
-        .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+        .res-val { color: rgba(255,255,255,0.7); }
+        .dot {
+            width: 6px; height: 6px; border-radius: 50%; display: inline-block;
+            box-shadow: 0 0 4px currentColor;
+        }
         #info {
-            position: fixed; bottom: 12px; left: 12px;
-            color: #444; font-size: 11px; z-index: 10;
+            position: fixed; bottom: 10px; left: 14px;
+            color: rgba(255,255,255,0.15); font-size: 10px; z-index: 10;
+            letter-spacing: 0.3px;
         }
         #selected-info {
-            position: fixed; bottom: 12px; right: 12px;
-            color: #888; font-size: 12px; z-index: 10;
-            text-align: right;
+            position: fixed; bottom: 10px; right: 14px;
+            color: rgba(255,255,255,0.35); font-size: 11px; z-index: 10;
+            text-align: right; letter-spacing: 0.3px;
         }
     </style>
 </head>
 <body>
     <div id="hud">
-        <span style="color:#666; font-weight:bold;">ZONE</span>
-        <div class="res"><span class="dot" style="background:#4488cc"></span>Water: <span id="r-water">0</span></div>
-        <div class="res"><span class="dot" style="background:#44aa44"></span>Wood: <span id="r-wood">0</span></div>
-        <div class="res"><span class="dot" style="background:#7788aa"></span>Metal: <span id="r-metal">0</span></div>
-        <div style="margin-left:auto; color:#888;">Units: <span id="unit-count">0</span></div>
+        <span class="logo">ZONE</span>
+        <div class="res"><span class="dot" style="color:#3a7abf"></span><span class="res-val" id="r-water">0</span></div>
+        <div class="res"><span class="dot" style="color:#3a8a3a"></span><span class="res-val" id="r-wood">0</span></div>
+        <div class="res"><span class="dot" style="color:#6a7080"></span><span class="res-val" id="r-metal">0</span></div>
+        <div style="margin-left:auto; color:rgba(255,255,255,0.25); font-size:11px;"><span id="unit-count">0</span> units</div>
     </div>
     <canvas id="game"></canvas>
-    <div id="info">WASD pan &middot; Scroll zoom &middot; Click/drag to select &middot; Click/drag to move &middot; Right-click deselect</div>
+    <div id="info">wasd &middot; scroll &middot; click &middot; drag</div>
     <div id="selected-info"></div>
 
     <script>
@@ -52,47 +63,43 @@
     window.addEventListener('resize', resize);
     resize();
 
-    // Constants
     const TILE = 32;
     const GW = 1000, GH = 1000;
-    const FOG_COLOR = '#050510';
-    const DRAG_THRESHOLD = 5; // pixels before a click becomes a drag
+    const FOG_COLOR = '#000000';
+    const DRAG_THRESHOLD = 5;
 
+    // OLED palette — pure black base, muted accents
     const TILE_COLORS = {
-        '':      '#16162a',
-        'water': '#12304a',
-        'wood':  '#1a3318',
-        'metal': '#252535',
+        '':      '#080810',
+        'water': '#06131f',
+        'wood':  '#081208',
+        'metal': '#0e0e14',
     };
     const TILE_BORDERS = {
-        'water': '#2a6090',
-        'wood':  '#2a6630',
-        'metal': '#4a4a60',
+        'water': '#1a3a5a',
+        'wood':  '#1a3a1a',
+        'metal': '#2a2a38',
     };
     const TILE_DIM = {
-        '':      '#0c0c18',
-        'water': '#0a1a28',
-        'wood':  '#0e1a0e',
-        'metal': '#151520',
+        '':      '#040408',
+        'water': '#030a12',
+        'wood':  '#040a04',
+        'metal': '#08080c',
     };
 
-    // Camera
     const cam = { x: 0, y: 0, zoom: 1.0 };
 
-    // Game state
     let player = null;
     let selectedUnits = new Set();
     let playerID = localStorage.getItem('playerID');
     let ws = null;
 
-    // Fog of war tile cache
     const tileCache = new Map();
     const revealed = new Set();
     let currentVisible = new Set();
 
-    // Mouse / drag state
     let mouseDown = false;
-    let dragStartScreen = null; // {x, y} screen coords at mousedown
+    let dragStartScreen = null;
     let dragCurrentScreen = null;
     let isDragging = false;
 
@@ -101,27 +108,16 @@
         if (playerID) localStorage.setItem('playerID', playerID);
     }
 
-    // --- localStorage map persistence ---
     const MAP_STORAGE_KEY = `zone_map_${playerID}`;
-    const MAP_SAVE_INTERVAL = 3000; // ms
+    const MAP_SAVE_INTERVAL = 3000;
 
     function saveMap() {
-        const data = {
-            revealed: [...revealed],
-            tiles: {},
-        };
-        // Only persist revealed tile data (resource/supply), not members (they move)
+        const data = { revealed: [...revealed], tiles: {} };
         for (const key of revealed) {
             const tile = tileCache.get(key);
-            if (tile) {
-                data.tiles[key] = { r: tile.r, s: tile.s };
-            }
+            if (tile) data.tiles[key] = { r: tile.r, s: tile.s };
         }
-        try {
-            localStorage.setItem(MAP_STORAGE_KEY, JSON.stringify(data));
-        } catch (e) {
-            // Storage full — silently ignore
-        }
+        try { localStorage.setItem(MAP_STORAGE_KEY, JSON.stringify(data)); } catch (e) {}
     }
 
     function loadMap() {
@@ -129,27 +125,19 @@
             const raw = localStorage.getItem(MAP_STORAGE_KEY);
             if (!raw) return;
             const data = JSON.parse(raw);
-            if (data.revealed) {
-                for (const key of data.revealed) {
-                    revealed.add(key);
-                }
-            }
+            if (data.revealed) for (const key of data.revealed) revealed.add(key);
             if (data.tiles) {
                 for (const [key, val] of Object.entries(data.tiles)) {
-                    if (!tileCache.has(key)) {
+                    if (!tileCache.has(key))
                         tileCache.set(key, { m: [], r: val.r || '', s: val.s || 0 });
-                    }
                 }
             }
-        } catch (e) {
-            // Corrupt data — ignore
-        }
+        } catch (e) {}
     }
 
     loadMap();
     setInterval(saveMap, MAP_SAVE_INTERVAL);
 
-    // --- Input ---
     const keys = {};
     window.addEventListener('keydown', e => {
         keys[e.key.toLowerCase()] = true;
@@ -159,15 +147,11 @@
 
     function screenToTile(sx, sy) {
         const ts = TILE * cam.zoom;
-        return {
-            x: Math.floor((sx + cam.x) / ts),
-            y: Math.floor((sy + cam.y) / ts),
-        };
+        return { x: Math.floor((sx + cam.x) / ts), y: Math.floor((sy + cam.y) / ts) };
     }
 
     function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 
-    // Compute tile-by-tile path matching server diagonal-then-straight movement
     function computePath(fromX, fromY, toX, toY) {
         const path = [];
         let x = fromX, y = fromY;
@@ -179,7 +163,6 @@
         return path;
     }
 
-    // Find a member by ID in the tile cache, returns {member, x, y} or null
     function findMember(id) {
         for (const [key, tile] of tileCache) {
             if (!tile.m) continue;
@@ -192,7 +175,6 @@
         return null;
     }
 
-    // Get all own units within a screen-space rectangle
     function unitsInScreenRect(sx0, sy0, sx1, sy1) {
         const t0 = screenToTile(Math.min(sx0, sx1), Math.min(sy0, sy1));
         const t1 = screenToTile(Math.max(sx0, sx1), Math.max(sy0, sy1));
@@ -209,7 +191,6 @@
         return units;
     }
 
-    // Distribute N positions across a tile rectangle
     function distributeInRect(n, tx0, ty0, tx1, ty1) {
         const minX = Math.min(tx0, tx1), maxX = Math.max(tx0, tx1);
         const minY = Math.min(ty0, ty1), maxY = Math.max(ty0, ty1);
@@ -228,17 +209,14 @@
     function sendMove(memberID, x, y) {
         if (ws && ws.readyState === WebSocket.OPEN) {
             ws.send(JSON.stringify({
-                type: 'move',
-                member_id: memberID,
-                x: clamp(x, 0, GW - 1),
-                y: clamp(y, 0, GH - 1),
+                type: 'move', member_id: memberID,
+                x: clamp(x, 0, GW - 1), y: clamp(y, 0, GH - 1),
             }));
         }
     }
 
-    // --- Mouse handlers ---
     canvas.addEventListener('mousedown', e => {
-        if (e.button !== 0) return; // left button only
+        if (e.button !== 0) return;
         mouseDown = true;
         isDragging = false;
         dragStartScreen = { x: e.clientX, y: e.clientY };
@@ -250,9 +228,7 @@
         dragCurrentScreen = { x: e.clientX, y: e.clientY };
         const dx = e.clientX - dragStartScreen.x;
         const dy = e.clientY - dragStartScreen.y;
-        if (Math.abs(dx) > DRAG_THRESHOLD || Math.abs(dy) > DRAG_THRESHOLD) {
-            isDragging = true;
-        }
+        if (Math.abs(dx) > DRAG_THRESHOLD || Math.abs(dy) > DRAG_THRESHOLD) isDragging = true;
     });
 
     canvas.addEventListener('mouseup', e => {
@@ -260,58 +236,39 @@
         const hasSelection = selectedUnits.size > 0;
 
         if (!isDragging) {
-            // --- CLICK ---
             const t = screenToTile(e.clientX, e.clientY);
             const key = t.x + ',' + t.y;
             const tile = tileCache.get(key);
 
             if (hasSelection) {
-                // Check if clicking another own unit to add/reselect
                 if (tile && tile.m && currentVisible.has(key)) {
                     const ownUnit = tile.m.find(m => m.owner === playerID && !selectedUnits.has(m.id));
                     if (ownUnit) {
-                        // Shift-click to add to selection, plain click to reselect single
-                        if (e.shiftKey) {
-                            selectedUnits.add(ownUnit.id);
-                        } else {
-                            selectedUnits.clear();
-                            selectedUnits.add(ownUnit.id);
-                        }
+                        if (e.shiftKey) selectedUnits.add(ownUnit.id);
+                        else { selectedUnits.clear(); selectedUnits.add(ownUnit.id); }
                         updateSelectedInfo();
-                        mouseDown = false;
-                        isDragging = false;
+                        mouseDown = false; isDragging = false;
                         return;
                     }
                 }
-                // Move all selected units to the clicked tile
-                for (const id of selectedUnits) {
-                    sendMove(id, t.x, t.y);
-                }
+                for (const id of selectedUnits) sendMove(id, t.x, t.y);
             } else {
-                // No selection — try to select a unit
                 if (tile && tile.m && currentVisible.has(key)) {
                     const unit = tile.m.find(m => m.owner === playerID);
-                    if (unit) {
-                        selectedUnits.add(unit.id);
-                    }
+                    if (unit) selectedUnits.add(unit.id);
                 }
             }
         } else {
-            // --- DRAG ---
             const sx0 = dragStartScreen.x, sy0 = dragStartScreen.y;
             const sx1 = e.clientX, sy1 = e.clientY;
 
             if (hasSelection) {
-                // Drag-to-distribute: spread units across destination area
                 const t0 = screenToTile(Math.min(sx0, sx1), Math.min(sy0, sy1));
                 const t1 = screenToTile(Math.max(sx0, sx1), Math.max(sy0, sy1));
                 const ids = [...selectedUnits];
                 const positions = distributeInRect(ids.length, t0.x, t0.y, t1.x, t1.y);
-                for (let i = 0; i < ids.length; i++) {
-                    sendMove(ids[i], positions[i].x, positions[i].y);
-                }
+                for (let i = 0; i < ids.length; i++) sendMove(ids[i], positions[i].x, positions[i].y);
             } else {
-                // Drag-to-select: box select own units
                 const ids = unitsInScreenRect(sx0, sy0, sx1, sy1);
                 selectedUnits.clear();
                 for (const id of ids) selectedUnits.add(id);
@@ -323,14 +280,12 @@
         isDragging = false;
     });
 
-    // Right-click to deselect
     canvas.addEventListener('contextmenu', e => {
         e.preventDefault();
         selectedUnits.clear();
         updateSelectedInfo();
     });
 
-    // Zoom toward mouse
     canvas.addEventListener('wheel', e => {
         e.preventDefault();
         const oldZoom = cam.zoom;
@@ -348,14 +303,14 @@
             const id = [...selectedUnits][0];
             const found = findMember(id);
             if (found) {
-                let info = `Selected: ${id} @ (${found.x}, ${found.y})`;
-                if (found.member.moving) info += ` -> (${found.member.tx}, ${found.member.ty})`;
+                let info = `${found.x},${found.y}`;
+                if (found.member.moving) info += ` > ${found.member.tx},${found.member.ty}`;
                 el.textContent = info;
             } else {
-                el.textContent = 'Selected: ' + id;
+                el.textContent = id;
             }
         } else {
-            el.textContent = `Selected: ${selectedUnits.size} units`;
+            el.textContent = `${selectedUnits.size} selected`;
         }
     }
 
@@ -365,7 +320,6 @@
         return '' + n;
     }
 
-    // Process server update: sparse visible tiles
     function applyUpdate(data) {
         if (data.p) {
             player = data.p;
@@ -391,7 +345,6 @@
         }
     }
 
-    // WebSocket
     function connect() {
         if (!playerID) return;
         const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -404,7 +357,6 @@
 
     // --- Render ---
     function render() {
-        // Camera movement (WASD)
         const speed = 12 / cam.zoom;
         if (keys['w'] || keys['arrowup'])    cam.y -= speed;
         if (keys['s'] || keys['arrowdown'])  cam.y += speed;
@@ -413,11 +365,9 @@
 
         const ts = TILE * cam.zoom;
 
-        // Clear
         ctx.fillStyle = FOG_COLOR;
         ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-        // Visible tile range on screen
         const x0 = Math.max(0, Math.floor(cam.x / ts));
         const y0 = Math.max(0, Math.floor(cam.y / ts));
         const x1 = Math.min(GW, Math.ceil((cam.x + canvas.width) / ts));
@@ -446,89 +396,106 @@
                     : (TILE_DIM[r] || TILE_DIM['']);
                 ctx.fillRect(sx, sy, ts, ts);
 
-                // Resource border (visible only)
+                // Resource accent line (visible only, single pixel inner border)
                 if (isVisible && r && TILE_BORDERS[r]) {
                     ctx.strokeStyle = TILE_BORDERS[r];
-                    ctx.lineWidth = 1;
-                    ctx.strokeRect(sx + 0.5, sy + 0.5, ts - 1, ts - 1);
+                    ctx.lineWidth = 0.5;
+                    ctx.strokeRect(sx + 1, sy + 1, ts - 2, ts - 2);
                 }
 
-                // Grid line
-                ctx.strokeStyle = isVisible ? '#1c1c35' : '#0e0e1c';
-                ctx.lineWidth = 0.5;
-                ctx.strokeRect(sx, sy, ts, ts);
+                // Grid — barely visible hairline
+                if (ts > 12) {
+                    ctx.strokeStyle = isVisible ? 'rgba(255,255,255,0.025)' : 'rgba(255,255,255,0.01)';
+                    ctx.lineWidth = 0.5;
+                    ctx.strokeRect(sx, sy, ts, ts);
+                }
 
-                // Resource supply label
-                if (isVisible && r && ts > 16) {
+                // Supply label
+                if (isVisible && r && ts > 18) {
                     ctx.fillStyle = TILE_BORDERS[r];
-                    ctx.globalAlpha = 0.45;
-                    ctx.font = `${Math.max(7, ts * 0.22)}px monospace`;
+                    ctx.globalAlpha = 0.3;
+                    ctx.font = `${Math.max(7, ts * 0.2)}px monospace`;
                     ctx.textAlign = 'center';
                     ctx.textBaseline = 'bottom';
-                    ctx.fillText(formatNumber(tile.s), sx + ts / 2, sy + ts - 1);
+                    ctx.fillText(formatNumber(tile.s), sx + ts / 2, sy + ts - 2);
                     ctx.globalAlpha = 1;
                     ctx.textAlign = 'start';
                     ctx.textBaseline = 'alphabetic';
                 }
 
-                // Members (visible only)
+                // Units
                 if (isVisible && tile.m && tile.m.length > 0) {
                     const count = tile.m.length;
                     tile.m.forEach((member, i) => {
-                        const offsetX = count > 1 ? (i - (count - 1) / 2) * ts * 0.2 : 0;
+                        const offsetX = count > 1 ? (i - (count - 1) / 2) * ts * 0.18 : 0;
                         const cx = sx + ts / 2 + offsetX;
                         const cy = sy + ts / 2;
-                        const radius = ts * 0.25;
+                        const radius = ts * 0.22;
 
                         const isOwn = member.owner === playerID;
                         if (isOwn) unitCount++;
 
-                        // Shadow
+                        const unitColor = isOwn ? [60, 200, 100] : [200, 60, 60];
+
+                        // Glow
                         ctx.beginPath();
-                        ctx.arc(cx + 1, cy + 1, radius, 0, Math.PI * 2);
-                        ctx.fillStyle = 'rgba(0,0,0,0.3)';
+                        ctx.arc(cx, cy, radius + 3, 0, Math.PI * 2);
+                        ctx.fillStyle = `rgba(${unitColor[0]},${unitColor[1]},${unitColor[2]},0.08)`;
                         ctx.fill();
 
-                        // Unit circle
+                        // Unit
                         ctx.beginPath();
                         ctx.arc(cx, cy, radius, 0, Math.PI * 2);
-                        ctx.fillStyle = isOwn ? '#44cc66' : '#cc4444';
+                        ctx.fillStyle = `rgba(${unitColor[0]},${unitColor[1]},${unitColor[2]},0.85)`;
                         ctx.fill();
 
-                        // Selection highlight
+                        // Selection ring
                         if (selectedUnits.has(member.id)) {
-                            ctx.strokeStyle = '#ffcc00';
-                            ctx.lineWidth = 2.5;
+                            ctx.beginPath();
+                            ctx.arc(cx, cy, radius + 2, 0, Math.PI * 2);
+                            ctx.strokeStyle = 'rgba(255,220,80,0.7)';
+                            ctx.lineWidth = 1.5;
                             ctx.stroke();
                         }
 
-                        // Moving indicator
+                        // Moving — outer pulse ring
                         if (member.moving) {
                             ctx.beginPath();
-                            ctx.arc(cx, cy, radius + 3, 0, Math.PI * 2);
-                            ctx.strokeStyle = isOwn ? 'rgba(68,204,102,0.4)' : 'rgba(204,68,68,0.3)';
-                            ctx.lineWidth = 1;
+                            ctx.arc(cx, cy, radius + 4, 0, Math.PI * 2);
+                            ctx.strokeStyle = `rgba(${unitColor[0]},${unitColor[1]},${unitColor[2]},0.2)`;
+                            ctx.lineWidth = 0.5;
                             ctx.stroke();
                         }
 
-                        // Mining indicator
+                        // Mining — dashed ring
                         if (!member.moving && isOwn && r) {
                             ctx.beginPath();
                             ctx.arc(cx, cy, radius + 2, 0, Math.PI * 2);
-                            ctx.strokeStyle = 'rgba(255,255,255,0.25)';
-                            ctx.lineWidth = 1;
+                            ctx.strokeStyle = 'rgba(255,255,255,0.12)';
+                            ctx.lineWidth = 0.5;
                             ctx.setLineDash([2, 2]);
                             ctx.stroke();
                             ctx.setLineDash([]);
                         }
                     });
+
+                    // Count badge
+                    if (count > 1 && ts > 12) {
+                        ctx.fillStyle = 'rgba(255,255,255,0.6)';
+                        ctx.font = `${Math.max(7, ts * 0.22)}px monospace`;
+                        ctx.textAlign = 'right';
+                        ctx.textBaseline = 'top';
+                        ctx.fillText(count, sx + ts - 2, sy + 2);
+                        ctx.textAlign = 'start';
+                        ctx.textBaseline = 'alphabetic';
+                    }
                 }
             }
         }
 
         document.getElementById('unit-count').textContent = unitCount;
 
-        // Draw paths for all selected units that are moving
+        // Paths for selected moving units
         for (const id of selectedUnits) {
             const found = findMember(id);
             if (!found || !found.member.moving) continue;
@@ -536,40 +503,35 @@
             const path = computePath(found.x, found.y, found.member.tx, found.member.ty);
             if (path.length === 0) continue;
 
-            // Highlight path tiles
+            // Path tiles
             for (let i = 0; i < path.length; i++) {
                 const px = path[i].x * ts - cam.x;
                 const py = path[i].y * ts - cam.y;
                 if (px + ts < 0 || px > canvas.width || py + ts < 0 || py > canvas.height) continue;
-                const alpha = 0.12 + 0.12 * (1 - i / path.length);
-                ctx.fillStyle = `rgba(255, 204, 0, ${alpha})`;
+                const alpha = 0.06 + 0.06 * (1 - i / path.length);
+                ctx.fillStyle = `rgba(255, 220, 80, ${alpha})`;
                 ctx.fillRect(px + 1, py + 1, ts - 2, ts - 2);
             }
 
-            // Connecting line
+            // Path line
             ctx.beginPath();
             ctx.moveTo(found.x * ts - cam.x + ts / 2, found.y * ts - cam.y + ts / 2);
-            for (const p of path) {
-                ctx.lineTo(p.x * ts - cam.x + ts / 2, p.y * ts - cam.y + ts / 2);
-            }
-            ctx.strokeStyle = 'rgba(255, 204, 0, 0.35)';
-            ctx.lineWidth = 1.5;
-            ctx.setLineDash([3, 3]);
+            for (const p of path) ctx.lineTo(p.x * ts - cam.x + ts / 2, p.y * ts - cam.y + ts / 2);
+            ctx.strokeStyle = 'rgba(255, 220, 80, 0.2)';
+            ctx.lineWidth = 1;
+            ctx.setLineDash([2, 4]);
             ctx.stroke();
             ctx.setLineDash([]);
 
-            // Destination marker
+            // Destination
             const dest = path[path.length - 1];
-            const ddx = dest.x * ts - cam.x;
-            const ddy = dest.y * ts - cam.y;
-            ctx.strokeStyle = 'rgba(255, 204, 0, 0.6)';
-            ctx.lineWidth = 2;
-            ctx.strokeRect(ddx + 2, ddy + 2, ts - 4, ts - 4);
+            ctx.strokeStyle = 'rgba(255, 220, 80, 0.35)';
+            ctx.lineWidth = 1;
+            ctx.strokeRect(dest.x * ts - cam.x + 2, dest.y * ts - cam.y + 2, ts - 4, ts - 4);
         }
 
-        // Fog edge darkening
+        // Fog edge — subtle vignette at vision boundary
         if (ts > 8) {
-            ctx.fillStyle = FOG_COLOR;
             for (let x = x0; x < x1; x++) {
                 for (let y = y0; y < y1; y++) {
                     const key = x + ',' + y;
@@ -581,15 +543,14 @@
                     if (neighbors.some(n => !currentVisible.has(n))) {
                         const sx = x * ts - cam.x;
                         const sy = y * ts - cam.y;
-                        ctx.globalAlpha = 0.15;
+                        ctx.fillStyle = 'rgba(0,0,0,0.2)';
                         ctx.fillRect(sx, sy, ts, ts);
-                        ctx.globalAlpha = 1;
                     }
                 }
             }
         }
 
-        // Draw drag selection/destination rectangle
+        // Drag visual
         if (isDragging && dragStartScreen && dragCurrentScreen) {
             const rx = Math.min(dragStartScreen.x, dragCurrentScreen.x);
             const ry = Math.min(dragStartScreen.y, dragCurrentScreen.y);
@@ -597,16 +558,14 @@
             const rh = Math.abs(dragCurrentScreen.y - dragStartScreen.y);
 
             if (selectedUnits.size > 0) {
-                // Destination rectangle (yellow)
-                ctx.strokeStyle = 'rgba(255, 204, 0, 0.6)';
-                ctx.fillStyle = 'rgba(255, 204, 0, 0.08)';
+                ctx.strokeStyle = 'rgba(255, 220, 80, 0.3)';
+                ctx.fillStyle = 'rgba(255, 220, 80, 0.03)';
             } else {
-                // Selection rectangle (green)
-                ctx.strokeStyle = 'rgba(68, 204, 102, 0.7)';
-                ctx.fillStyle = 'rgba(68, 204, 102, 0.1)';
+                ctx.strokeStyle = 'rgba(60, 200, 100, 0.35)';
+                ctx.fillStyle = 'rgba(60, 200, 100, 0.04)';
             }
-            ctx.lineWidth = 1.5;
-            ctx.setLineDash([4, 4]);
+            ctx.lineWidth = 1;
+            ctx.setLineDash([3, 5]);
             ctx.fillRect(rx, ry, rw, rh);
             ctx.strokeRect(rx, ry, rw, rh);
             ctx.setLineDash([]);
