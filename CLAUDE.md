@@ -36,3 +36,7 @@ go run .
 - Frontend uses vanilla JS with HTML5 Canvas (no frameworks)
 - Keep JSON payloads compact (short field names in struct tags)
 - Sparse tile broadcast for performance on large grids
+
+## Git Workflow
+- Always checkout to verify correct branch before committing and pushing
+- Commit and push after completing changes

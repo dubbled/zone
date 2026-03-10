@@ -1,10 +1,26 @@
 package main
 
+// BuildingType represents a player-constructed building on a tile.
+type BuildingType string
+
+const (
+	BuildingNone  BuildingType = ""
+	BuildingHouse BuildingType = "house"
+	BuildingMine  BuildingType = "mine"
+)
+
 // Node is a single tile in the game grid.
 type Node struct {
-	Members  []*Member    `json:"m"`
-	Resource ResourceType `json:"r,omitempty"`
-	Supply   int          `json:"s,omitempty"`
+	Members        []*Member    `json:"m"`
+	Resource       ResourceType `json:"r,omitempty"`
+	Supply         int          `json:"s,omitempty"`
+	Building       BuildingType `json:"b,omitempty"`
+	BuildingOwner  string       `json:"bo,omitempty"`
+	BuildProgress  int          `json:"bp,omitempty"`
+	BuildTarget    int          `json:"bt,omitempty"`
+	IsConstructing bool         `json:"bc,omitempty"`
+
+	lastSpawnTick int // internal: tick when house last spawned a unit
 }
 
 func createNode(resource ResourceType) *Node {
@@ -44,4 +60,15 @@ func (n *Node) Deplete(amount int) int {
 		n.Supply = 0
 	}
 	return mined
+}
+
+// CountUnitsByOwner returns the number of "unit" type members for a given owner.
+func (n *Node) CountUnitsByOwner(ownerID string) int {
+	count := 0
+	for _, m := range n.Members {
+		if m.Typ == "unit" && m.OwnerID == ownerID {
+			count++
+		}
+	}
+	return count
 }
