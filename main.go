@@ -38,19 +38,71 @@ type State struct {
 	conns   map[string]*websocket.Conn
 }
 
+// Cluster size ranges per resource type.
+var clusterSize = map[ResourceType][2]int{
+	ResourceWood:  {8, 25},
+	ResourceMetal: {3, 12},
+	ResourceWater: {10, 30},
+}
+
 func buildGraph(w, h int) Graph {
 	graph := make(Graph, w)
-	types := []ResourceType{ResourceWater, ResourceWood, ResourceMetal}
 	for x := range graph {
 		graph[x] = make([]*Node, h)
 		for y := range graph[x] {
-			resource := ResourceNone
-			if rand.Float64() < ResourceDensity {
-				resource = types[rand.Intn(len(types))]
-			}
-			graph[x][y] = createNode(resource)
+			graph[x][y] = createNode(ResourceNone)
 		}
 	}
+
+	// Seed resource clusters until ~ResourceDensity of the map is covered.
+	totalTiles := w * h
+	targetResourceTiles := int(float64(totalTiles) * ResourceDensity)
+	placed := 0
+	types := []ResourceType{ResourceWater, ResourceWood, ResourceMetal}
+
+	for placed < targetResourceTiles {
+		res := types[rand.Intn(len(types))]
+		sizeRange := clusterSize[res]
+		size := sizeRange[0] + rand.Intn(sizeRange[1]-sizeRange[0]+1)
+
+		// Random seed point
+		sx := rand.Intn(w)
+		sy := rand.Intn(h)
+
+		// Grow cluster via randomized BFS
+		type pt struct{ x, y int }
+		frontier := []pt{{sx, sy}}
+		visited := map[pt]bool{{sx, sy}: true}
+		count := 0
+
+		for len(frontier) > 0 && count < size {
+			// Pick a random frontier tile (not strict BFS — gives organic shapes)
+			idx := rand.Intn(len(frontier))
+			p := frontier[idx]
+			frontier[idx] = frontier[len(frontier)-1]
+			frontier = frontier[:len(frontier)-1]
+
+			if graph[p.x][p.y].Resource != ResourceNone {
+				continue
+			}
+
+			graph[p.x][p.y].Resource = res
+			graph[p.x][p.y].Supply = supplyForResource(res)
+			count++
+
+			// Add neighbors
+			for _, d := range [][2]int{{1, 0}, {-1, 0}, {0, 1}, {0, -1}} {
+				nx, ny := p.x+d[0], p.y+d[1]
+				np := pt{nx, ny}
+				if nx >= 0 && nx < w && ny >= 0 && ny < h && !visited[np] {
+					visited[np] = true
+					frontier = append(frontier, np)
+				}
+			}
+		}
+		placed += count
+	}
+
 	return graph
 }
 
