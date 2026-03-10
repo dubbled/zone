@@ -1,23 +1,18 @@
 package main
 
-type NodeAttribute string
-
-const (
-	NodeWaterSource NodeAttribute = "node_water_source"
-	NodeIronSource  NodeAttribute = "node_iron_source"
-)
-
-// Node is a single vertex in the graph
+// Node is a single tile in the game grid.
 type Node struct {
-	Members    []*Member        `json:"m"`
-	Attributes []*NodeAttribute `json:"a"`
+	Members  []*Member    `json:"m"`
+	Resource ResourceType `json:"r,omitempty"`
+	Supply   int          `json:"s,omitempty"`
 }
 
-func GetNode(g Graph, x, y int) *Node {
-	if g.SizeX() <= x || g.SizeY() <= y {
-		return nil
+func createNode(resource ResourceType) *Node {
+	return &Node{
+		Members:  []*Member{},
+		Resource: resource,
+		Supply:   supplyForResource(resource),
 	}
-	return g[x][y]
 }
 
 func (n *Node) AddMember(m *Member) {
@@ -25,14 +20,28 @@ func (n *Node) AddMember(m *Member) {
 }
 
 func (n *Node) RemoveMember(m *Member) {
-	if m.Count > 0 {
-		m.Count--
-	} else {
-		for i, member := range n.Members {
-			if member == m {
-				n.Members = append(n.Members[:i], n.Members[i+1:]...)
-				return
-			}
+	for i, member := range n.Members {
+		if member.ID == m.ID {
+			n.Members = append(n.Members[:i], n.Members[i+1:]...)
+			return
 		}
 	}
+}
+
+// Deplete reduces supply by amount and returns actual amount mined.
+// When supply hits zero, the resource is cleared.
+func (n *Node) Deplete(amount int) int {
+	if n.Resource == ResourceNone || n.Supply <= 0 {
+		return 0
+	}
+	mined := amount
+	if mined > n.Supply {
+		mined = n.Supply
+	}
+	n.Supply -= mined
+	if n.Supply <= 0 {
+		n.Resource = ResourceNone
+		n.Supply = 0
+	}
+	return mined
 }

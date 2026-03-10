@@ -1,41 +1,20 @@
 package main
 
-import (
-	"log"
-)
+const StartingResources = 100
 
-// Player executes actions against the game state
+// Player tracks a connected player's identity and mined resources.
 type Player struct {
-	id            string
-	x, y          int
-	QueuedActions []Action
+	ID        string         `json:"id"`
+	Resources map[string]int `json:"resources"`
 }
 
-func createPlayer(id string, x, y int) *Player {
-	p := &Player{id: id, x: x, y: y}
-
-	return p
-}
-
-func (p *Player) validateAction(a Action) error {
-	return nil
-}
-
-func (p *Player) error(err error) {
-	log.Println(err)
-}
-
-func (p *Player) QueueAction(a Action) {
-	if err := p.validateAction(a); err != nil {
-		p.error(err)
-		return
+func createPlayer(id string) *Player {
+	return &Player{
+		ID: id,
+		Resources: map[string]int{
+			"water": StartingResources,
+			"wood":  StartingResources,
+			"metal": StartingResources,
+		},
 	}
-
-	p.QueuedActions = append(p.QueuedActions, a)
-}
-
-func (p *Player) MoveMember(g Graph, m *Member, x, y int) {
-	// validate travel path/distance
-	m.node.RemoveMember(m)
-	g[x][y].AddMember(m)
 }

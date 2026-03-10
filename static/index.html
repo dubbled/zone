@@ -1,134 +1,620 @@
 <!DOCTYPE html>
 <html lang="en">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Canvas Grid Example</title>
-        <style>
-            body { margin: 0; }
-            #container { position: relative; width: 100vw; height: 100vh; overflow: auto; }
-            canvas { position: absolute; left: 0; top: 0; display: block; }
-            header { 
-                width: 100%;
-                background-color: #1c1c1c;
-                color: white;
-                padding: 10px;
-                position: fixed;
-                z-index: 5;
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Zone</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #050510; overflow: hidden; font-family: 'Courier New', monospace; }
+        canvas { display: block; cursor: crosshair; }
+        #hud {
+            position: fixed; top: 0; left: 0; right: 0;
+            padding: 10px 16px;
+            background: rgba(5, 5, 16, 0.94);
+            color: #ccc; display: flex; gap: 24px; align-items: center;
+            border-bottom: 1px solid #2a2a4a;
+            font-size: 14px; z-index: 10;
+        }
+        .res { display: flex; align-items: center; gap: 6px; }
+        .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+        #info {
+            position: fixed; bottom: 12px; left: 12px;
+            color: #444; font-size: 11px; z-index: 10;
+        }
+        #selected-info {
+            position: fixed; bottom: 12px; right: 12px;
+            color: #888; font-size: 12px; z-index: 10;
+            text-align: right;
+        }
+    </style>
+</head>
+<body>
+    <div id="hud">
+        <span style="color:#666; font-weight:bold;">ZONE</span>
+        <div class="res"><span class="dot" style="background:#4488cc"></span>Water: <span id="r-water">0</span></div>
+        <div class="res"><span class="dot" style="background:#44aa44"></span>Wood: <span id="r-wood">0</span></div>
+        <div class="res"><span class="dot" style="background:#7788aa"></span>Metal: <span id="r-metal">0</span></div>
+        <div style="margin-left:auto; color:#888;">Units: <span id="unit-count">0</span></div>
+    </div>
+    <canvas id="game"></canvas>
+    <div id="info">WASD pan &middot; Scroll zoom &middot; Click/drag to select &middot; Click/drag to move &middot; Right-click deselect</div>
+    <div id="selected-info"></div>
+
+    <script>
+    const canvas = document.getElementById('game');
+    const ctx = canvas.getContext('2d');
+
+    function resize() {
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+    }
+    window.addEventListener('resize', resize);
+    resize();
+
+    // Constants
+    const TILE = 32;
+    const GW = 1000, GH = 1000;
+    const FOG_COLOR = '#050510';
+    const DRAG_THRESHOLD = 5; // pixels before a click becomes a drag
+
+    const TILE_COLORS = {
+        '':      '#16162a',
+        'water': '#12304a',
+        'wood':  '#1a3318',
+        'metal': '#252535',
+    };
+    const TILE_BORDERS = {
+        'water': '#2a6090',
+        'wood':  '#2a6630',
+        'metal': '#4a4a60',
+    };
+    const TILE_DIM = {
+        '':      '#0c0c18',
+        'water': '#0a1a28',
+        'wood':  '#0e1a0e',
+        'metal': '#151520',
+    };
+
+    // Camera
+    const cam = { x: 0, y: 0, zoom: 1.0 };
+
+    // Game state
+    let player = null;
+    let selectedUnits = new Set();
+    let playerID = localStorage.getItem('playerID');
+    let ws = null;
+
+    // Fog of war tile cache
+    const tileCache = new Map();
+    const revealed = new Set();
+    let currentVisible = new Set();
+
+    // Mouse / drag state
+    let mouseDown = false;
+    let dragStartScreen = null; // {x, y} screen coords at mousedown
+    let dragCurrentScreen = null;
+    let isDragging = false;
+
+    if (!playerID) {
+        playerID = prompt('Enter your player name:');
+        if (playerID) localStorage.setItem('playerID', playerID);
+    }
+
+    // --- localStorage map persistence ---
+    const MAP_STORAGE_KEY = `zone_map_${playerID}`;
+    const MAP_SAVE_INTERVAL = 3000; // ms
+
+    function saveMap() {
+        const data = {
+            revealed: [...revealed],
+            tiles: {},
+        };
+        // Only persist revealed tile data (resource/supply), not members (they move)
+        for (const key of revealed) {
+            const tile = tileCache.get(key);
+            if (tile) {
+                data.tiles[key] = { r: tile.r, s: tile.s };
             }
-        </style>
-    </head>
+        }
+        try {
+            localStorage.setItem(MAP_STORAGE_KEY, JSON.stringify(data));
+        } catch (e) {
+            // Storage full — silently ignore
+        }
+    }
 
-    <body>
-        <div id="container">
-            <!-- <header>
-                <button>Connect</button>
-                <button>Disconnect</button>
-            </header> -->
-            <canvas id="grid-canvas"></canvas>
-            <canvas id="circle-canvas"></canvas>
-        </div>
-        <script>
-            const WIDTH = 20000;
-            const HEIGHT = 20000;
-            const GRID_SIZE = 10;
-
-            // Set up canvases
-            const gridCanvas = document.getElementById('grid-canvas');
-            const circleCanvas = document.getElementById('circle-canvas');
-            gridCanvas.width = circleCanvas.width = WIDTH;
-            gridCanvas.height = circleCanvas.height = HEIGHT;
-
-            // Position canvases absolutely
-            gridCanvas.style.zIndex = 0;
-            circleCanvas.style.zIndex = 1;
-
-            // Draw grid
-            const drawGrid = (ctx) => {
-                ctx.clearRect(0, 0, WIDTH, HEIGHT);
-                ctx.strokeStyle = 'gray';
-                ctx.lineWidth = 1;
-                for (let i = 0; i <= HEIGHT / GRID_SIZE; i++) {
-                    ctx.beginPath();
-                    ctx.moveTo(0, i * GRID_SIZE);
-                    ctx.lineTo(WIDTH, i * GRID_SIZE);
-                    ctx.stroke();
-                }
-                for (let j = 0; j <= WIDTH / GRID_SIZE; j++) {
-                    ctx.beginPath();
-                    ctx.moveTo(j * GRID_SIZE, 0);
-                    ctx.lineTo(j * GRID_SIZE, HEIGHT);
-                    ctx.stroke();
+    function loadMap() {
+        try {
+            const raw = localStorage.getItem(MAP_STORAGE_KEY);
+            if (!raw) return;
+            const data = JSON.parse(raw);
+            if (data.revealed) {
+                for (const key of data.revealed) {
+                    revealed.add(key);
                 }
             }
+            if (data.tiles) {
+                for (const [key, val] of Object.entries(data.tiles)) {
+                    if (!tileCache.has(key)) {
+                        tileCache.set(key, { m: [], r: val.r || '', s: val.s || 0 });
+                    }
+                }
+            }
+        } catch (e) {
+            // Corrupt data — ignore
+        }
+    }
 
-            // Draw circles based on graph state
-            const drawGraphMembers = (ctx, graph) => {
-                ctx.clearRect(0, 0, WIDTH, HEIGHT);
-                if (!Array.isArray(graph)) return;
-                for (let x = 0; x < graph.length; x++) {
-                    for (let y = 0; y < graph[x].length; y++) {
-                        const node = graph[x][y];
-                        if (!node || !Array.isArray(node.m)) continue;
-                        const cx = x * GRID_SIZE + GRID_SIZE / 2;
-                        const cy = y * GRID_SIZE + GRID_SIZE / 2;
-                        // Draw a circle for each member
-                        for (const member of node.m) {
-                            ctx.beginPath();
-                            ctx.arc(cx, cy, 3, 0, 2 * Math.PI);
-                            ctx.fillStyle = member.typ === 'player' ? 'red' : 'blue';
-                            ctx.fill();
-                            ctx.strokeStyle = 'black';
+    loadMap();
+    setInterval(saveMap, MAP_SAVE_INTERVAL);
+
+    // --- Input ---
+    const keys = {};
+    window.addEventListener('keydown', e => {
+        keys[e.key.toLowerCase()] = true;
+        if (e.key === 'Escape') { selectedUnits.clear(); updateSelectedInfo(); }
+    });
+    window.addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; });
+
+    function screenToTile(sx, sy) {
+        const ts = TILE * cam.zoom;
+        return {
+            x: Math.floor((sx + cam.x) / ts),
+            y: Math.floor((sy + cam.y) / ts),
+        };
+    }
+
+    function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+    // Compute tile-by-tile path matching server diagonal-then-straight movement
+    function computePath(fromX, fromY, toX, toY) {
+        const path = [];
+        let x = fromX, y = fromY;
+        while (x !== toX || y !== toY) {
+            x += Math.sign(toX - x);
+            y += Math.sign(toY - y);
+            path.push({ x, y });
+        }
+        return path;
+    }
+
+    // Find a member by ID in the tile cache, returns {member, x, y} or null
+    function findMember(id) {
+        for (const [key, tile] of tileCache) {
+            if (!tile.m) continue;
+            const member = tile.m.find(m => m.id === id);
+            if (member) {
+                const [x, y] = key.split(',').map(Number);
+                return { member, x, y };
+            }
+        }
+        return null;
+    }
+
+    // Get all own units within a screen-space rectangle
+    function unitsInScreenRect(sx0, sy0, sx1, sy1) {
+        const t0 = screenToTile(Math.min(sx0, sx1), Math.min(sy0, sy1));
+        const t1 = screenToTile(Math.max(sx0, sx1), Math.max(sy0, sy1));
+        const units = [];
+        for (let x = Math.max(0, t0.x); x <= Math.min(GW - 1, t1.x); x++) {
+            for (let y = Math.max(0, t0.y); y <= Math.min(GH - 1, t1.y); y++) {
+                const tile = tileCache.get(x + ',' + y);
+                if (!tile || !tile.m) continue;
+                for (const m of tile.m) {
+                    if (m.owner === playerID) units.push(m.id);
+                }
+            }
+        }
+        return units;
+    }
+
+    // Distribute N positions across a tile rectangle
+    function distributeInRect(n, tx0, ty0, tx1, ty1) {
+        const minX = Math.min(tx0, tx1), maxX = Math.max(tx0, tx1);
+        const minY = Math.min(ty0, ty1), maxY = Math.max(ty0, ty1);
+        const w = maxX - minX + 1;
+        const h = maxY - minY + 1;
+        const positions = [];
+        for (let i = 0; i < n; i++) {
+            positions.push({
+                x: clamp(minX + (i % w), 0, GW - 1),
+                y: clamp(minY + Math.floor(i / w) % h, 0, GH - 1),
+            });
+        }
+        return positions;
+    }
+
+    function sendMove(memberID, x, y) {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({
+                type: 'move',
+                member_id: memberID,
+                x: clamp(x, 0, GW - 1),
+                y: clamp(y, 0, GH - 1),
+            }));
+        }
+    }
+
+    // --- Mouse handlers ---
+    canvas.addEventListener('mousedown', e => {
+        if (e.button !== 0) return; // left button only
+        mouseDown = true;
+        isDragging = false;
+        dragStartScreen = { x: e.clientX, y: e.clientY };
+        dragCurrentScreen = { x: e.clientX, y: e.clientY };
+    });
+
+    canvas.addEventListener('mousemove', e => {
+        if (!mouseDown) return;
+        dragCurrentScreen = { x: e.clientX, y: e.clientY };
+        const dx = e.clientX - dragStartScreen.x;
+        const dy = e.clientY - dragStartScreen.y;
+        if (Math.abs(dx) > DRAG_THRESHOLD || Math.abs(dy) > DRAG_THRESHOLD) {
+            isDragging = true;
+        }
+    });
+
+    canvas.addEventListener('mouseup', e => {
+        if (e.button !== 0) { mouseDown = false; return; }
+        const hasSelection = selectedUnits.size > 0;
+
+        if (!isDragging) {
+            // --- CLICK ---
+            const t = screenToTile(e.clientX, e.clientY);
+            const key = t.x + ',' + t.y;
+            const tile = tileCache.get(key);
+
+            if (hasSelection) {
+                // Check if clicking another own unit to add/reselect
+                if (tile && tile.m && currentVisible.has(key)) {
+                    const ownUnit = tile.m.find(m => m.owner === playerID && !selectedUnits.has(m.id));
+                    if (ownUnit) {
+                        // Shift-click to add to selection, plain click to reselect single
+                        if (e.shiftKey) {
+                            selectedUnits.add(ownUnit.id);
+                        } else {
+                            selectedUnits.clear();
+                            selectedUnits.add(ownUnit.id);
+                        }
+                        updateSelectedInfo();
+                        mouseDown = false;
+                        isDragging = false;
+                        return;
+                    }
+                }
+                // Move all selected units to the clicked tile
+                for (const id of selectedUnits) {
+                    sendMove(id, t.x, t.y);
+                }
+            } else {
+                // No selection — try to select a unit
+                if (tile && tile.m && currentVisible.has(key)) {
+                    const unit = tile.m.find(m => m.owner === playerID);
+                    if (unit) {
+                        selectedUnits.add(unit.id);
+                    }
+                }
+            }
+        } else {
+            // --- DRAG ---
+            const sx0 = dragStartScreen.x, sy0 = dragStartScreen.y;
+            const sx1 = e.clientX, sy1 = e.clientY;
+
+            if (hasSelection) {
+                // Drag-to-distribute: spread units across destination area
+                const t0 = screenToTile(Math.min(sx0, sx1), Math.min(sy0, sy1));
+                const t1 = screenToTile(Math.max(sx0, sx1), Math.max(sy0, sy1));
+                const ids = [...selectedUnits];
+                const positions = distributeInRect(ids.length, t0.x, t0.y, t1.x, t1.y);
+                for (let i = 0; i < ids.length; i++) {
+                    sendMove(ids[i], positions[i].x, positions[i].y);
+                }
+            } else {
+                // Drag-to-select: box select own units
+                const ids = unitsInScreenRect(sx0, sy0, sx1, sy1);
+                selectedUnits.clear();
+                for (const id of ids) selectedUnits.add(id);
+            }
+        }
+
+        updateSelectedInfo();
+        mouseDown = false;
+        isDragging = false;
+    });
+
+    // Right-click to deselect
+    canvas.addEventListener('contextmenu', e => {
+        e.preventDefault();
+        selectedUnits.clear();
+        updateSelectedInfo();
+    });
+
+    // Zoom toward mouse
+    canvas.addEventListener('wheel', e => {
+        e.preventDefault();
+        const oldZoom = cam.zoom;
+        cam.zoom *= e.deltaY < 0 ? 1.12 : 0.89;
+        cam.zoom = clamp(cam.zoom, 0.1, 6);
+        const factor = cam.zoom / oldZoom;
+        cam.x = e.clientX * (factor - 1) + cam.x * factor;
+        cam.y = e.clientY * (factor - 1) + cam.y * factor;
+    }, { passive: false });
+
+    function updateSelectedInfo() {
+        const el = document.getElementById('selected-info');
+        if (selectedUnits.size === 0) { el.textContent = ''; return; }
+        if (selectedUnits.size === 1) {
+            const id = [...selectedUnits][0];
+            const found = findMember(id);
+            if (found) {
+                let info = `Selected: ${id} @ (${found.x}, ${found.y})`;
+                if (found.member.moving) info += ` -> (${found.member.tx}, ${found.member.ty})`;
+                el.textContent = info;
+            } else {
+                el.textContent = 'Selected: ' + id;
+            }
+        } else {
+            el.textContent = `Selected: ${selectedUnits.size} units`;
+        }
+    }
+
+    function formatNumber(n) {
+        if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M';
+        if (n >= 1_000) return (n / 1_000).toFixed(1) + 'K';
+        return '' + n;
+    }
+
+    // Process server update: sparse visible tiles
+    function applyUpdate(data) {
+        if (data.p) {
+            player = data.p;
+            document.getElementById('r-water').textContent = formatNumber(player.resources.water || 0);
+            document.getElementById('r-wood').textContent = formatNumber(player.resources.wood || 0);
+            document.getElementById('r-metal').textContent = formatNumber(player.resources.metal || 0);
+        }
+
+        if (data.v) {
+            const newVisible = new Set();
+            for (const tile of data.v) {
+                const key = tile.x + ',' + tile.y;
+                tileCache.set(key, { m: tile.m || [], r: tile.r || '', s: tile.s || 0 });
+                revealed.add(key);
+                newVisible.add(key);
+            }
+            currentVisible = newVisible;
+        }
+
+        if (data.type === 'init' && data.spawnX !== undefined) {
+            cam.x = data.spawnX * TILE * cam.zoom - canvas.width / 2;
+            cam.y = data.spawnY * TILE * cam.zoom - canvas.height / 2;
+        }
+    }
+
+    // WebSocket
+    function connect() {
+        if (!playerID) return;
+        const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+        ws = new WebSocket(`${proto}//${location.host}/ws/${playerID}`);
+        ws.onmessage = e => { applyUpdate(JSON.parse(e.data)); };
+        ws.onclose = () => { setTimeout(connect, 2000); };
+        ws.onerror = () => {};
+    }
+    connect();
+
+    // --- Render ---
+    function render() {
+        // Camera movement (WASD)
+        const speed = 12 / cam.zoom;
+        if (keys['w'] || keys['arrowup'])    cam.y -= speed;
+        if (keys['s'] || keys['arrowdown'])  cam.y += speed;
+        if (keys['a'] || keys['arrowleft'])  cam.x -= speed;
+        if (keys['d'] || keys['arrowright']) cam.x += speed;
+
+        const ts = TILE * cam.zoom;
+
+        // Clear
+        ctx.fillStyle = FOG_COLOR;
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        // Visible tile range on screen
+        const x0 = Math.max(0, Math.floor(cam.x / ts));
+        const y0 = Math.max(0, Math.floor(cam.y / ts));
+        const x1 = Math.min(GW, Math.ceil((cam.x + canvas.width) / ts));
+        const y1 = Math.min(GH, Math.ceil((cam.y + canvas.height) / ts));
+
+        let unitCount = 0;
+
+        for (let x = x0; x < x1; x++) {
+            for (let y = y0; y < y1; y++) {
+                const key = x + ',' + y;
+                const isVisible = currentVisible.has(key);
+                const isRevealed = revealed.has(key);
+
+                if (!isRevealed) continue;
+
+                const tile = tileCache.get(key);
+                if (!tile) continue;
+
+                const sx = x * ts - cam.x;
+                const sy = y * ts - cam.y;
+                const r = tile.r || '';
+
+                // Tile fill
+                ctx.fillStyle = isVisible
+                    ? (TILE_COLORS[r] || TILE_COLORS[''])
+                    : (TILE_DIM[r] || TILE_DIM['']);
+                ctx.fillRect(sx, sy, ts, ts);
+
+                // Resource border (visible only)
+                if (isVisible && r && TILE_BORDERS[r]) {
+                    ctx.strokeStyle = TILE_BORDERS[r];
+                    ctx.lineWidth = 1;
+                    ctx.strokeRect(sx + 0.5, sy + 0.5, ts - 1, ts - 1);
+                }
+
+                // Grid line
+                ctx.strokeStyle = isVisible ? '#1c1c35' : '#0e0e1c';
+                ctx.lineWidth = 0.5;
+                ctx.strokeRect(sx, sy, ts, ts);
+
+                // Resource supply label
+                if (isVisible && r && ts > 16) {
+                    ctx.fillStyle = TILE_BORDERS[r];
+                    ctx.globalAlpha = 0.45;
+                    ctx.font = `${Math.max(7, ts * 0.22)}px monospace`;
+                    ctx.textAlign = 'center';
+                    ctx.textBaseline = 'bottom';
+                    ctx.fillText(formatNumber(tile.s), sx + ts / 2, sy + ts - 1);
+                    ctx.globalAlpha = 1;
+                    ctx.textAlign = 'start';
+                    ctx.textBaseline = 'alphabetic';
+                }
+
+                // Members (visible only)
+                if (isVisible && tile.m && tile.m.length > 0) {
+                    const count = tile.m.length;
+                    tile.m.forEach((member, i) => {
+                        const offsetX = count > 1 ? (i - (count - 1) / 2) * ts * 0.2 : 0;
+                        const cx = sx + ts / 2 + offsetX;
+                        const cy = sy + ts / 2;
+                        const radius = ts * 0.25;
+
+                        const isOwn = member.owner === playerID;
+                        if (isOwn) unitCount++;
+
+                        // Shadow
+                        ctx.beginPath();
+                        ctx.arc(cx + 1, cy + 1, radius, 0, Math.PI * 2);
+                        ctx.fillStyle = 'rgba(0,0,0,0.3)';
+                        ctx.fill();
+
+                        // Unit circle
+                        ctx.beginPath();
+                        ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+                        ctx.fillStyle = isOwn ? '#44cc66' : '#cc4444';
+                        ctx.fill();
+
+                        // Selection highlight
+                        if (selectedUnits.has(member.id)) {
+                            ctx.strokeStyle = '#ffcc00';
+                            ctx.lineWidth = 2.5;
                             ctx.stroke();
                         }
+
+                        // Moving indicator
+                        if (member.moving) {
+                            ctx.beginPath();
+                            ctx.arc(cx, cy, radius + 3, 0, Math.PI * 2);
+                            ctx.strokeStyle = isOwn ? 'rgba(68,204,102,0.4)' : 'rgba(204,68,68,0.3)';
+                            ctx.lineWidth = 1;
+                            ctx.stroke();
+                        }
+
+                        // Mining indicator
+                        if (!member.moving && isOwn && r) {
+                            ctx.beginPath();
+                            ctx.arc(cx, cy, radius + 2, 0, Math.PI * 2);
+                            ctx.strokeStyle = 'rgba(255,255,255,0.25)';
+                            ctx.lineWidth = 1;
+                            ctx.setLineDash([2, 2]);
+                            ctx.stroke();
+                            ctx.setLineDash([]);
+                        }
+                    });
+                }
+            }
+        }
+
+        document.getElementById('unit-count').textContent = unitCount;
+
+        // Draw paths for all selected units that are moving
+        for (const id of selectedUnits) {
+            const found = findMember(id);
+            if (!found || !found.member.moving) continue;
+
+            const path = computePath(found.x, found.y, found.member.tx, found.member.ty);
+            if (path.length === 0) continue;
+
+            // Highlight path tiles
+            for (let i = 0; i < path.length; i++) {
+                const px = path[i].x * ts - cam.x;
+                const py = path[i].y * ts - cam.y;
+                if (px + ts < 0 || px > canvas.width || py + ts < 0 || py > canvas.height) continue;
+                const alpha = 0.12 + 0.12 * (1 - i / path.length);
+                ctx.fillStyle = `rgba(255, 204, 0, ${alpha})`;
+                ctx.fillRect(px + 1, py + 1, ts - 2, ts - 2);
+            }
+
+            // Connecting line
+            ctx.beginPath();
+            ctx.moveTo(found.x * ts - cam.x + ts / 2, found.y * ts - cam.y + ts / 2);
+            for (const p of path) {
+                ctx.lineTo(p.x * ts - cam.x + ts / 2, p.y * ts - cam.y + ts / 2);
+            }
+            ctx.strokeStyle = 'rgba(255, 204, 0, 0.35)';
+            ctx.lineWidth = 1.5;
+            ctx.setLineDash([3, 3]);
+            ctx.stroke();
+            ctx.setLineDash([]);
+
+            // Destination marker
+            const dest = path[path.length - 1];
+            const ddx = dest.x * ts - cam.x;
+            const ddy = dest.y * ts - cam.y;
+            ctx.strokeStyle = 'rgba(255, 204, 0, 0.6)';
+            ctx.lineWidth = 2;
+            ctx.strokeRect(ddx + 2, ddy + 2, ts - 4, ts - 4);
+        }
+
+        // Fog edge darkening
+        if (ts > 8) {
+            ctx.fillStyle = FOG_COLOR;
+            for (let x = x0; x < x1; x++) {
+                for (let y = y0; y < y1; y++) {
+                    const key = x + ',' + y;
+                    if (!currentVisible.has(key)) continue;
+                    const neighbors = [
+                        (x-1)+','+y, (x+1)+','+y,
+                        x+','+(y-1), x+','+(y+1),
+                    ];
+                    if (neighbors.some(n => !currentVisible.has(n))) {
+                        const sx = x * ts - cam.x;
+                        const sy = y * ts - cam.y;
+                        ctx.globalAlpha = 0.15;
+                        ctx.fillRect(sx, sy, ts, ts);
+                        ctx.globalAlpha = 1;
                     }
                 }
             }
+        }
 
-            drawGrid(gridCanvas.getContext('2d'));
+        // Draw drag selection/destination rectangle
+        if (isDragging && dragStartScreen && dragCurrentScreen) {
+            const rx = Math.min(dragStartScreen.x, dragCurrentScreen.x);
+            const ry = Math.min(dragStartScreen.y, dragCurrentScreen.y);
+            const rw = Math.abs(dragCurrentScreen.x - dragStartScreen.x);
+            const rh = Math.abs(dragCurrentScreen.y - dragStartScreen.y);
 
-            // Connect to backend and update graph
-            const connectToGameUpdates = (playerID) => {
-                const wsUrl = `ws://localhost:8080/updates/${playerID}`;
-                const ws = new WebSocket(wsUrl);
-
-                ws.onopen = () => {
-                    console.log('WebSocket connected');
-                };
-
-                ws.onmessage = (event) => {
-                    try {
-                        const data = JSON.parse(event.data);
-                        if (data.graph) {
-                            drawGraphMembers(circleCanvas.getContext('2d'), data.graph);
-                        }
-                    } catch (e) {
-                        console.error('Error parsing message', e);
-                    }
-                };
-
-                ws.onerror = (err) => {
-                    console.error('WebSocket error', err);
-                };
-
-                ws.onclose = () => {
-                    console.log('WebSocket closed, retrying in 2s...');
-                    setTimeout(() => connectToGameUpdates(playerID), 2000);
-                };
-
-                // Optionally, expose ws for sending actions
-                window.gameSocket = ws;
+            if (selectedUnits.size > 0) {
+                // Destination rectangle (yellow)
+                ctx.strokeStyle = 'rgba(255, 204, 0, 0.6)';
+                ctx.fillStyle = 'rgba(255, 204, 0, 0.08)';
+            } else {
+                // Selection rectangle (green)
+                ctx.strokeStyle = 'rgba(68, 204, 102, 0.7)';
+                ctx.fillStyle = 'rgba(68, 204, 102, 0.1)';
             }
+            ctx.lineWidth = 1.5;
+            ctx.setLineDash([4, 4]);
+            ctx.fillRect(rx, ry, rw, rh);
+            ctx.strokeRect(rx, ry, rw, rh);
+            ctx.setLineDash([]);
+        }
 
-            // Example: prompt for playerID and connect
-            let playerID = localStorage.getItem('playerID');
-            if (!playerID) {
-                playerID = prompt('Enter your player ID:');
-                if (playerID) localStorage.setItem('playerID', playerID);
-            }
-            if (playerID) {
-                connectToGameUpdates(playerID);
-            }
-        </script>
-    </body>
+        requestAnimationFrame(render);
+    }
+    requestAnimationFrame(render);
+    </script>
+</body>
 </html>
