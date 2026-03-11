@@ -1,9 +1,11 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"log"
-	"math/rand"
+	mrand "math/rand"
 	"net/http"
 	"sync"
 	"time"
@@ -21,6 +23,19 @@ const (
 	ResourceDensity = 0.15
 	MinSpawnDist    = 30
 	VisionRadius    = 10
+	HouseSpawnRate  = 100 // ticks between house spawns
+	MinUnitsForMine = 5
+	MineRateMulti   = 3 // mining rate multiplier on mine tiles
+)
+
+// Building costs: map[resource]amount
+var HouseCost = map[string]int{"wood": 50, "metal": 25}
+var MineCost = map[string]int{"wood": 30, "metal": 75}
+
+// Build times (in construction points; each unit contributes 1 per tick)
+const (
+	HouseBuildTime = 10
+	MineBuildTime  = 20
 )
 
 // Graph is a 2D grid of nodes.
@@ -29,13 +44,21 @@ type Graph [][]*Node
 func (g Graph) SizeX() int { return len(g) }
 func (g Graph) SizeY() int { return len(g[0]) }
 
+func genMapHash() string {
+	b := make([]byte, 8)
+	rand.Read(b)
+	return hex.EncodeToString(b)
+}
+
 // State holds all game state.
 type State struct {
-	mu      sync.RWMutex
-	players map[string]*Player
-	graph   Graph
-	members map[string]*Member
-	conns   map[string]*websocket.Conn
+	mu        sync.RWMutex
+	players   map[string]*Player
+	graph     Graph
+	members   map[string]*Member
+	conns     map[string]*websocket.Conn
+	tickCount int
+	mapHash   string
 }
 
 // Cluster size ranges per resource type.
@@ -54,30 +77,26 @@ func buildGraph(w, h int) Graph {
 		}
 	}
 
-	// Seed resource clusters until ~ResourceDensity of the map is covered.
 	totalTiles := w * h
 	targetResourceTiles := int(float64(totalTiles) * ResourceDensity)
 	placed := 0
 	types := []ResourceType{ResourceWater, ResourceWood, ResourceMetal}
 
 	for placed < targetResourceTiles {
-		res := types[rand.Intn(len(types))]
+		res := types[mrand.Intn(len(types))]
 		sizeRange := clusterSize[res]
-		size := sizeRange[0] + rand.Intn(sizeRange[1]-sizeRange[0]+1)
+		size := sizeRange[0] + mrand.Intn(sizeRange[1]-sizeRange[0]+1)
 
-		// Random seed point
-		sx := rand.Intn(w)
-		sy := rand.Intn(h)
+		sx := mrand.Intn(w)
+		sy := mrand.Intn(h)
 
-		// Grow cluster via randomized BFS
 		type pt struct{ x, y int }
 		frontier := []pt{{sx, sy}}
 		visited := map[pt]bool{{sx, sy}: true}
 		count := 0
 
 		for len(frontier) > 0 && count < size {
-			// Pick a random frontier tile (not strict BFS — gives organic shapes)
-			idx := rand.Intn(len(frontier))
+			idx := mrand.Intn(len(frontier))
 			p := frontier[idx]
 			frontier[idx] = frontier[len(frontier)-1]
 			frontier = frontier[:len(frontier)-1]
@@ -90,7 +109,6 @@ func buildGraph(w, h int) Graph {
 			graph[p.x][p.y].Supply = supplyForResource(res)
 			count++
 
-			// Add neighbors
 			for _, d := range [][2]int{{1, 0}, {-1, 0}, {0, 1}, {0, -1}} {
 				nx, ny := p.x+d[0], p.y+d[1]
 				np := pt{nx, ny}
@@ -106,13 +124,12 @@ func buildGraph(w, h int) Graph {
 	return graph
 }
 
-// findSafeSpawn returns coordinates at least minDist tiles from any existing member.
 func findSafeSpawn(graph Graph, members map[string]*Member, minDist int) (int, int) {
 	sizeX := graph.SizeX()
 	sizeY := graph.SizeY()
 	for {
-		x := rand.Intn(sizeX)
-		y := rand.Intn(sizeY)
+		x := mrand.Intn(sizeX)
+		y := mrand.Intn(sizeY)
 		safe := true
 		for _, m := range members {
 			dx := m.x - x
@@ -135,8 +152,8 @@ func (s *State) addPlayer(id string) *Player {
 	x, y := findSafeSpawn(s.graph, s.members, MinSpawnDist)
 
 	for i := 0; i < SpawnUnits; i++ {
-		sx := clamp(x+rand.Intn(3)-1, 0, GridWidth-1)
-		sy := clamp(y+rand.Intn(3)-1, 0, GridHeight-1)
+		sx := clamp(x+mrand.Intn(3)-1, 0, GridWidth-1)
+		sy := clamp(y+mrand.Intn(3)-1, 0, GridHeight-1)
 		m := createMember("unit", id, sx, sy, s.graph[sx][sy])
 		s.members[m.ID] = m
 	}
@@ -154,6 +171,21 @@ func clamp(v, lo, hi int) int {
 	return v
 }
 
+func canAfford(p *Player, cost map[string]int) bool {
+	for res, amount := range cost {
+		if p.Resources[res] < amount {
+			return false
+		}
+	}
+	return true
+}
+
+func deductCost(p *Player, cost map[string]int) {
+	for res, amount := range cost {
+		p.Resources[res] -= amount
+	}
+}
+
 func sign(x int) int {
 	if x > 0 {
 		return 1
@@ -166,8 +198,28 @@ func sign(x int) int {
 
 func (s *State) tick() {
 	s.mu.Lock()
+	s.tickCount++
 
-	// Collect movements
+	// 1. Move units
+	s.moveUnits()
+
+	// 2. Advance construction
+	s.advanceConstruction()
+
+	// 3. Resolve combat on contested tiles
+	s.resolveCombat()
+
+	// 4. House spawning
+	s.spawnFromHouses()
+
+	// 5. Mine resources (boosted by mines)
+	s.mineResources()
+
+	s.mu.Unlock()
+	s.broadcast()
+}
+
+func (s *State) moveUnits() {
 	type movement struct {
 		member       *Member
 		fromX, fromY int
@@ -188,7 +240,6 @@ func (s *State) tick() {
 		}
 	}
 
-	// Apply movements
 	for _, mv := range moves {
 		s.graph[mv.fromX][mv.fromY].RemoveMember(mv.member)
 		mv.member.x = mv.toX
@@ -200,8 +251,110 @@ func (s *State) tick() {
 			mv.member.HasTarget = false
 		}
 	}
+}
 
-	// Mine resources: idle units on resource tiles deplete the node
+func (s *State) advanceConstruction() {
+	for x := range s.graph {
+		for y := range s.graph[x] {
+			node := s.graph[x][y]
+			if !node.IsConstructing {
+				continue
+			}
+			workers := node.CountUnitsByOwner(node.BuildingOwner)
+			if workers == 0 {
+				continue
+			}
+			node.BuildProgress += workers
+			if node.BuildProgress >= node.BuildTarget {
+				node.IsConstructing = false
+				node.BuildProgress = 0
+				node.BuildTarget = 0
+				if node.Building == BuildingHouse {
+					node.lastSpawnTick = s.tickCount
+				}
+			}
+		}
+	}
+}
+
+func (s *State) resolveCombat() {
+	type pos struct{ x, y int }
+	nodeOwners := make(map[pos]map[string][]*Member)
+
+	for _, m := range s.members {
+		if m.Typ != "unit" {
+			continue
+		}
+		p := pos{m.x, m.y}
+		if nodeOwners[p] == nil {
+			nodeOwners[p] = make(map[string][]*Member)
+		}
+		nodeOwners[p][m.OwnerID] = append(nodeOwners[p][m.OwnerID], m)
+	}
+
+	for p, owners := range nodeOwners {
+		if len(owners) < 2 {
+			continue
+		}
+
+		// Find player with most and second-most units
+		var maxOwner string
+		var maxCount, secondCount int
+		for owner, units := range owners {
+			if len(units) > maxCount {
+				secondCount = maxCount
+				maxOwner = owner
+				maxCount = len(units)
+			} else if len(units) > secondCount {
+				secondCount = len(units)
+			}
+		}
+
+		// Kill all units from losing players
+		for owner, units := range owners {
+			if owner == maxOwner {
+				continue
+			}
+			for _, m := range units {
+				s.graph[p.x][p.y].RemoveMember(m)
+				delete(s.members, m.ID)
+			}
+		}
+
+		// Winner loses units equal to second-highest count
+		killed := 0
+		for _, m := range owners[maxOwner] {
+			if killed >= secondCount {
+				break
+			}
+			s.graph[p.x][p.y].RemoveMember(m)
+			delete(s.members, m.ID)
+			killed++
+		}
+	}
+}
+
+func (s *State) spawnFromHouses() {
+	for x := range s.graph {
+		for y := range s.graph[x] {
+			node := s.graph[x][y]
+			if node.Building != BuildingHouse || node.IsConstructing {
+				continue
+			}
+			if node.CountUnitsByOwner(node.BuildingOwner) < 2 {
+				continue
+			}
+			if s.tickCount-node.lastSpawnTick < HouseSpawnRate {
+				continue
+			}
+			node.lastSpawnTick = s.tickCount
+			m := createMember("unit", node.BuildingOwner, x, y, node)
+			s.members[m.ID] = m
+		}
+	}
+}
+
+func (s *State) mineResources() {
 	for _, m := range s.members {
 		if m.HasTarget || m.Typ != "unit" {
 			continue
@@ -210,29 +363,38 @@ func (s *State) tick() {
 		if node.Resource == ResourceNone {
 			continue
 		}
-		if player := s.players[m.OwnerID]; player != nil {
-			resType := string(node.Resource)
-			mined := node.Deplete(1)
-			if mined > 0 {
-				player.Resources[resType] += mined
-			}
+		player := s.players[m.OwnerID]
+		if player == nil {
+			continue
+		}
+
+		rate := 1
+		if node.Building == BuildingMine && !node.IsConstructing && node.BuildingOwner == m.OwnerID {
+			rate = MineRateMulti
+		}
+
+		resType := string(node.Resource)
+		mined := node.Deplete(rate)
+		if mined > 0 {
+			player.Resources[resType] += mined
 		}
 	}
-
-	s.mu.Unlock()
-	s.broadcast()
 }
 
 // VisibleNode is a single tile sent to a client within their fog of war.
 type VisibleNode struct {
-	X        int          `json:"x"`
-	Y        int          `json:"y"`
-	Members  []*Member    `json:"m,omitempty"`
-	Resource ResourceType `json:"r,omitempty"`
-	Supply   int          `json:"s,omitempty"`
+	X              int          `json:"x"`
+	Y              int          `json:"y"`
+	Members        []*Member    `json:"m,omitempty"`
+	Resource       ResourceType `json:"r,omitempty"`
+	Supply         int          `json:"s,omitempty"`
+	Building       BuildingType `json:"b,omitempty"`
+	BuildingOwner  string       `json:"bo,omitempty"`
+	BuildProgress  int          `json:"bp,omitempty"`
+	BuildTarget    int          `json:"bt,omitempty"`
+	IsConstructing bool         `json:"bc,omitempty"`
 }
 
-// visibleTiles computes all tiles within VisionRadius of any of the player's units.
 func (s *State) visibleTiles(playerID string) []VisibleNode {
 	seen := make(map[[2]int]bool)
 	for _, m := range s.members {
@@ -258,11 +420,16 @@ func (s *State) visibleTiles(playerID string) []VisibleNode {
 	for coord := range seen {
 		node := s.graph[coord[0]][coord[1]]
 		tiles = append(tiles, VisibleNode{
-			X:        coord[0],
-			Y:        coord[1],
-			Members:  node.Members,
-			Resource: node.Resource,
-			Supply:   node.Supply,
+			X:              coord[0],
+			Y:              coord[1],
+			Members:        node.Members,
+			Resource:       node.Resource,
+			Supply:         node.Supply,
+			Building:       node.Building,
+			BuildingOwner:  node.BuildingOwner,
+			BuildProgress:  node.BuildProgress,
+			BuildTarget:    node.BuildTarget,
+			IsConstructing: node.IsConstructing,
 		})
 	}
 	return tiles
@@ -325,7 +492,6 @@ func socketHandler(state *State) http.HandlerFunc {
 		}
 		state.conns[playerID] = conn
 
-		// Find spawn position for camera
 		var spawnX, spawnY int
 		for _, m := range state.members {
 			if m.OwnerID == playerID {
@@ -335,21 +501,23 @@ func socketHandler(state *State) http.HandlerFunc {
 			}
 		}
 
-		// Build initial visible tiles
 		tiles := state.visibleTiles(playerID)
 		state.mu.Unlock()
 
-		// Send init message with spawn position and visible area
 		initMsg, _ := json.Marshal(map[string]interface{}{
-			"type":   "init",
-			"spawnX": spawnX,
-			"spawnY": spawnY,
-			"v":      tiles,
-			"p":      player,
+			"type":    "init",
+			"spawnX":  spawnX,
+			"spawnY":  spawnY,
+			"v":       tiles,
+			"p":       player,
+			"mapHash": state.mapHash,
+			"costs": map[string]interface{}{
+				"house": map[string]interface{}{"resources": HouseCost, "buildTime": HouseBuildTime},
+				"mine":  map[string]interface{}{"resources": MineCost, "buildTime": MineBuildTime},
+			},
 		})
 		conn.WriteMessage(websocket.TextMessage, initMsg)
 
-		// Read loop: process player actions
 		for {
 			_, message, err := conn.ReadMessage()
 			if err != nil {
@@ -371,11 +539,36 @@ func socketHandler(state *State) http.HandlerFunc {
 					member.TargetY = clamp(action.Y, 0, GridHeight-1)
 					member.HasTarget = true
 				}
+
+			case "build_house":
+				x, y := clamp(action.X, 0, GridWidth-1), clamp(action.Y, 0, GridHeight-1)
+				node := state.graph[x][y]
+				p := state.players[playerID]
+				if p != nil && node.Building == BuildingNone && !node.IsConstructing && node.CountUnitsByOwner(playerID) >= 1 && canAfford(p, HouseCost) {
+					deductCost(p, HouseCost)
+					node.Building = BuildingHouse
+					node.BuildingOwner = playerID
+					node.IsConstructing = true
+					node.BuildProgress = 0
+					node.BuildTarget = HouseBuildTime
+				}
+
+			case "build_mine":
+				x, y := clamp(action.X, 0, GridWidth-1), clamp(action.Y, 0, GridHeight-1)
+				node := state.graph[x][y]
+				p := state.players[playerID]
+				if p != nil && node.Building == BuildingNone && !node.IsConstructing && node.CountUnitsByOwner(playerID) >= MinUnitsForMine && canAfford(p, MineCost) {
+					deductCost(p, MineCost)
+					node.Building = BuildingMine
+					node.BuildingOwner = playerID
+					node.IsConstructing = true
+					node.BuildProgress = 0
+					node.BuildTarget = MineBuildTime
+				}
 			}
 			state.mu.Unlock()
 		}
 
-		// Cleanup on disconnect
 		state.mu.Lock()
 		delete(state.conns, playerID)
 		state.mu.Unlock()
@@ -390,6 +583,7 @@ func main() {
 		graph:   buildGraph(GridWidth, GridHeight),
 		members: make(map[string]*Member),
 		conns:   make(map[string]*websocket.Conn),
+		mapHash: genMapHash(),
 	}
 	log.Println("graph ready")
 
@@ -412,7 +606,6 @@ func main() {
 		}
 	}()
 
-	// Game loop
 	ticker := time.NewTicker(TickRate)
 	for range ticker.C {
 		state.tick()
